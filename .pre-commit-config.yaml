@@ -1,0 +1,32 @@
+# Pre-commit hooks using uv run to keep tool versions in sync with pyproject.toml
+# Install: uv run pre-commit install
+# Run all: uv run pre-commit run --all-files
+
+repos:
+  # Keep uv.lock in sync
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.5.14
+    hooks:
+      - id: uv-lock
+
+  # Local hooks that use uv run (single source of truth for tool versions)
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (fix)
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        args: [dd_cli]

@@ -1,0 +1,13 @@
+# Datadog site (no trailing slash). Examples:
+#   us3.datadoghq.com
+#   datadoghq.com
+#   datadoghq.eu
+export DD_SITE=us3.datadoghq.com
+
+# API key value
+export DD_API_KEY="changeme"
+
+# Application key VALUE (secret). Do NOT put the App Key ID/UUID here.
+# In Datadog UI, the App Key value is shown at creation time and is different
+# from the app key's ID shown in the keys list.
+export DD_APP_KEY="changeme"

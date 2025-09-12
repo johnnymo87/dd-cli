@@ -1,0 +1,18 @@
+# Secrets
+.envrc
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+
+# direnv
+.envrc
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
+

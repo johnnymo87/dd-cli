@@ -12,7 +12,7 @@ def _default_site() -> str:
     return env("DD_SITE", "us3.datadoghq.com") or "us3.datadoghq.com"
 
 
-def _get_client(site: str) -> DatadogClient:
+def _get_client(site: str, timeout: float = 15.0) -> DatadogClient:
     """Create a DatadogClient, raising UsageError if credentials are missing."""
     api_key = env("DD_API_KEY")
     app_key = env("DD_APP_KEY")
@@ -22,7 +22,7 @@ def _get_client(site: str) -> DatadogClient:
             "DD_API_KEY and DD_APP_KEY must be set. The v2 APIs require both."
         )
 
-    return DatadogClient(site=site, api_key=api_key, app_key=app_key)
+    return DatadogClient(site=site, api_key=api_key, app_key=app_key, timeout=timeout)
 
 
 def _handle_api_error(e: DatadogAPIError) -> None:
@@ -284,6 +284,13 @@ def validate_cmd(site: str) -> None:
     help="Storage tier to search",
 )
 @click.option("--all-pages", is_flag=True, help="Fetch all pages (up to 50)")
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds (increase for flex tier)",
+)
 def search_logs_cmd(
     query: str,
     site: str,
@@ -292,6 +299,7 @@ def search_logs_cmd(
     limit: int,
     storage_tier: str | None,
     all_pages: bool,
+    timeout: float,
 ) -> None:
     """Search logs with Datadog query syntax.
 
@@ -302,7 +310,7 @@ def search_logs_cmd(
     all_logs: list[dict[str, Any]] = []
 
     try:
-        with _get_client(site) as dd:
+        with _get_client(site, timeout=timeout) as dd:
             for _ in range(max_pages):
                 data = dd.search_logs(
                     query=query,

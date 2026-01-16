@@ -291,6 +291,12 @@ def validate_cmd(site: str) -> None:
     show_default=True,
     help="Request timeout in seconds (increase for flex tier)",
 )
+@click.option(
+    "--max-results",
+    type=int,
+    default=None,
+    help="Stop fetching after this many results (use with --all-pages)",
+)
 def search_logs_cmd(
     query: str,
     site: str,
@@ -300,6 +306,7 @@ def search_logs_cmd(
     storage_tier: str | None,
     all_pages: bool,
     timeout: float,
+    max_results: int | None,
 ) -> None:
     """Search logs with Datadog query syntax.
 
@@ -324,6 +331,11 @@ def search_logs_cmd(
                 logs = data.get("data", [])
                 if isinstance(logs, list):
                     all_logs.extend(logs)
+
+                # Check if we've hit max_results
+                if max_results and len(all_logs) >= max_results:
+                    all_logs = all_logs[:max_results]
+                    break
 
                 cursor = (data.get("meta") or {}).get("page", {}).get("after")
                 if not cursor:

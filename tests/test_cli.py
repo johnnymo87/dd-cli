@@ -1,5 +1,6 @@
 """Tests for dd_cli."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -96,8 +97,6 @@ class TestSearchLogsMaxResults:
             # Should only call search_logs once since first page has >= 50 results
             assert mock_client.search_logs.call_count == 1
 
-            import json
-
             output = json.loads(result.output)
             assert output["count"] == 50
             assert len(output["data"]) == 50
@@ -135,7 +134,80 @@ class TestSearchLogsMaxResults:
             # Should call search_logs 3 times to get 120 results
             assert mock_client.search_logs.call_count == 3
 
-            import json
-
             output = json.loads(result.output)
             assert output["count"] == 120
+
+
+class TestSearchLogsFormat:
+    """Tests for --format option."""
+
+    def test_format_jsonl_outputs_one_object_per_line(self, runner, mock_env):
+        """Verify --format jsonl outputs one JSON object per line."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.search_logs.return_value = {
+                "data": [
+                    {"id": "1", "attributes": {"message": "log 1"}},
+                    {"id": "2", "attributes": {"message": "log 2"}},
+                ],
+                "meta": {},
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["search-logs", "test query", "--format", "jsonl"]
+            )
+
+            assert result.exit_code == 0
+            lines = result.output.strip().split("\n")
+            assert len(lines) == 2
+
+            log1 = json.loads(lines[0])
+            log2 = json.loads(lines[1])
+            assert log1["id"] == "1"
+            assert log2["id"] == "2"
+
+    def test_format_messages_outputs_message_field_only(self, runner, mock_env):
+        """Verify --format messages outputs only the message field."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.search_logs.return_value = {
+                "data": [
+                    {"id": "1", "attributes": {"message": "First log message"}},
+                    {"id": "2", "attributes": {"message": "Second log message"}},
+                ],
+                "meta": {},
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["search-logs", "test query", "--format", "messages"]
+            )
+
+            assert result.exit_code == 0
+            lines = result.output.strip().split("\n")
+            assert lines == ["First log message", "Second log message"]
+
+    def test_default_format_is_json(self, runner, mock_env):
+        """Verify default format is json with data and count."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.search_logs.return_value = {
+                "data": [{"id": "1"}],
+                "meta": {},
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["search-logs", "test query"])
+
+            assert result.exit_code == 0
+            output = json.loads(result.output)
+            assert "data" in output
+            assert "count" in output
+            assert output["count"] == 1

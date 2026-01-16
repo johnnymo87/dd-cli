@@ -297,6 +297,14 @@ def validate_cmd(site: str) -> None:
     default=None,
     help="Stop fetching after this many results (use with --all-pages)",
 )
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "jsonl", "messages"]),
+    default="json",
+    show_default=True,
+    help="Output format: json, jsonl (one per line), messages (message only)",
+)
 def search_logs_cmd(
     query: str,
     site: str,
@@ -307,6 +315,7 @@ def search_logs_cmd(
     all_pages: bool,
     timeout: float,
     max_results: int | None,
+    output_format: str,
 ) -> None:
     """Search logs with Datadog query syntax.
 
@@ -346,7 +355,21 @@ def search_logs_cmd(
     except RuntimeError as e:
         raise click.ClickException(str(e)) from None
 
-    click.echo(json.dumps({"data": all_logs, "count": len(all_logs)}, indent=2))
+    _output_logs(all_logs, output_format)
+
+
+def _output_logs(logs: list[dict[str, Any]], output_format: str) -> None:
+    """Output logs in the specified format."""
+    if output_format == "json":
+        click.echo(json.dumps({"data": logs, "count": len(logs)}, indent=2))
+    elif output_format == "jsonl":
+        for log in logs:
+            click.echo(json.dumps(log))
+    elif output_format == "messages":
+        for log in logs:
+            message = log.get("attributes", {}).get("message", "")
+            if message:
+                click.echo(message)
 
 
 def main() -> None:

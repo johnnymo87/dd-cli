@@ -32,6 +32,19 @@ dd get-incident 152 --enrich
 | `dd get-incident ID` | Get incident by ID (with optional `--enrich`) |
 | `dd update-incident ID` | Update incident fields |
 
+### search-logs Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--from` | `now-15m` | Start time (e.g., `now-1h`, `now-7d`) |
+| `--to` | `now` | End time |
+| `--limit` | `100` | Max logs per page |
+| `--storage-tier` | - | Storage tier: `indexes`, `flex`, `online-archives` |
+| `--all-pages` | - | Fetch all pages (up to 50) |
+| `--max-results` | - | Stop after N results (use with `--all-pages`) |
+| `--timeout` | `15` | Request timeout in seconds (increase for flex) |
+| `--format` | `json` | Output: `json`, `jsonl`, `messages` |
+
 Run `dd --help` or `dd <command> --help` for details.
 
 ## Configuration

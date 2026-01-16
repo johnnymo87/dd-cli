@@ -1,6 +1,6 @@
 [project]
 name = "dd-cli"
-version = "0.2.0"
+version = "0.3.0"
 description = "CLI for Datadog APIs (incidents, logs, and more)"
 readme = "README.md"
 requires-python = ">=3.11,<4.0"

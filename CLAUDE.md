@@ -31,6 +31,9 @@ dd get-incident 152 --enrich
 | `dd search-logs QUERY` | Search logs with Datadog query syntax |
 | `dd get-incident ID` | Get incident by ID (with optional `--enrich`) |
 | `dd update-incident ID` | Update incident fields |
+| `dd create-log-metric ID` | Create a log-based count metric (works with flex tier) |
+| `dd create-monitor` | Create a monitor (metric alert, query alert, etc.) |
+| `dd get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
 
 ### search-logs Options
 
@@ -62,6 +65,9 @@ These are available as Claude Code skills in `.claude/skills/`:
 - **datadog-auth** - Troubleshoot 401/403 errors, understand keys and regions
 - **datadog-logs** - Log search syntax, storage tiers (flex), pagination
 - **datadog-incidents** - Incident enrichment, update fields, API patterns
+- **datadog-log-metrics** - Log-based count metrics (ingestion-time, works with flex tier)
+- **datadog-monitors** - Create monitors with thresholds and Slack notifications
+- **datadog-workflows** - Fetch workflow definitions and execution instances
 
 ## Development
 

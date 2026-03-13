@@ -281,6 +281,88 @@ class DatadogClient:
             params["query"] = query
         return self._request("GET", "/api/v1/monitor/search", params=params)
 
+    # ── Error Tracking (v2) ────────────────────────────────────────
+
+    def search_error_tracking_issues(
+        self,
+        *,
+        query: str,
+        time_from: int,
+        time_to: int,
+        track: str = "trace",
+        order_by: str | None = None,
+        include: str | None = None,
+    ) -> dict[str, Any]:
+        """Search error tracking issues.
+
+        Args:
+            query: Search query (e.g., 'service:my-service')
+            time_from: Start timestamp in epoch milliseconds
+            time_to: End timestamp in epoch milliseconds
+            track: 'trace', 'logs', or 'rum'
+            order_by: Sort order (TOTAL_COUNT, FIRST_SEEN, etc.)
+            include: Comma-separated related objects to sideload
+        """
+        body: dict[str, Any] = {
+            "data": {
+                "attributes": {
+                    "query": query,
+                    "from": time_from,
+                    "to": time_to,
+                    "track": track,
+                },
+                "type": "search_request",
+            }
+        }
+        if order_by:
+            body["data"]["attributes"]["order_by"] = order_by
+
+        params = {}
+        if include:
+            params["include"] = include
+
+        return self._request(
+            "POST",
+            "/api/v2/error-tracking/issues/search",
+            json_body=body,
+            params=params,
+        )
+
+    def get_error_tracking_issue(
+        self,
+        issue_id: str,
+        *,
+        include: str | None = None,
+    ) -> dict[str, Any]:
+        """Get a single error tracking issue by ID."""
+        params = {}
+        if include:
+            params["include"] = include
+        return self._request(
+            "GET",
+            f"/api/v2/error-tracking/issues/{issue_id}",
+            params=params,
+        )
+
+    def update_error_tracking_issue_state(
+        self,
+        issue_id: str,
+        *,
+        state: str,
+    ) -> dict[str, Any]:
+        """Update error tracking issue state (OPEN, RESOLVED, IGNORED)."""
+        body = {
+            "data": {
+                "attributes": {"state": state},
+                "type": "update_request",
+            }
+        }
+        return self._request(
+            "PUT",
+            f"/api/v2/error-tracking/issues/{issue_id}/state",
+            json_body=body,
+        )
+
     # ── Workflows (v2) ──────────────────────────────────────────────
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:

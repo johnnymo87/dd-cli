@@ -616,6 +616,198 @@ def _parse_workflow_ref(ref: str) -> tuple[str, str | None]:
     return ref, None
 
 
+def _parse_time_to_epoch_ms(value: str) -> int:
+    """Convert a relative time string (now-1h, now-7d) or epoch ms to int."""
+    import re
+    import time
+
+    if value.isdigit():
+        return int(value)
+
+    m = re.match(r"now-(\d+)([mhd])", value)
+    if not m:
+        raise click.UsageError(
+            f"Invalid time format: {value}. Use 'now-1h', 'now-7d', or epoch ms."
+        )
+    amount = int(m.group(1))
+    unit = m.group(2)
+    multipliers = {"m": 60, "h": 3600, "d": 86400}
+    offset_s = amount * multipliers[unit]
+    return int((time.time() - offset_s) * 1000)
+
+
+@cli.command("search-et-issues")
+@click.argument("query", metavar="QUERY")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--from",
+    "time_from",
+    default="now-1d",
+    show_default=True,
+    help="Start time (e.g., now-1h, now-7d, or epoch ms)",
+)
+@click.option(
+    "--to",
+    "time_to",
+    default=None,
+    help="End time (default: now)",
+)
+@click.option(
+    "--track",
+    type=click.Choice(["trace", "logs", "rum"]),
+    default="trace",
+    show_default=True,
+    help="Error tracking source",
+)
+@click.option(
+    "--order-by",
+    type=click.Choice(["TOTAL_COUNT", "FIRST_SEEN", "IMPACTED_SESSIONS", "PRIORITY"]),
+    default=None,
+    help="Sort order",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def search_et_issues_cmd(
+    query: str,
+    site: str,
+    time_from: str,
+    time_to: str | None,
+    track: str,
+    order_by: str | None,
+    timeout: float,
+) -> None:
+    """Search error tracking issues.
+
+    Example: dd search-et-issues 'service:ba-fulfillment-*' --from now-7d
+
+    \b
+    Query uses Datadog search syntax:
+        service:my-service
+        service:my-* AND @error.type:NullPointerException
+    """
+    import time as time_mod
+
+    from_ms = _parse_time_to_epoch_ms(time_from)
+    to_ms = _parse_time_to_epoch_ms(time_to) if time_to else int(time_mod.time() * 1000)
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.search_error_tracking_issues(
+                query=query,
+                time_from=from_ms,
+                time_to=to_ms,
+                track=track,
+                order_by=order_by,
+                include="issue,issue.assignee",
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
+@cli.command("get-et-issue")
+@click.argument("issue_id", metavar="ISSUE_ID")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def get_et_issue_cmd(
+    issue_id: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Get a single error tracking issue by ID.
+
+    Example: dd get-et-issue c1726a66-1f64-11ee-b338-da7ad0900002
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.get_error_tracking_issue(
+                issue_id,
+                include="issue,issue.assignee,issue.case",
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
+@cli.command("update-et-issue-state")
+@click.argument("issue_id", metavar="ISSUE_ID")
+@click.argument(
+    "state",
+    type=click.Choice(["OPEN", "RESOLVED", "IGNORED"], case_sensitive=False),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def update_et_issue_state_cmd(
+    issue_id: str,
+    state: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Update an error tracking issue's state.
+
+    \b
+    States:
+      OPEN      - Mark issue as open / for review
+      RESOLVED  - Mark issue as resolved
+      IGNORED   - Suppress from monitors and notifications
+
+    Example: dd update-et-issue-state c1726a66-... RESOLVED
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.update_error_tracking_issue_state(
+                issue_id,
+                state=state.upper(),
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
 def main() -> None:
     cli()
 

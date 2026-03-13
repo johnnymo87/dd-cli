@@ -9,7 +9,7 @@ description: Search and manage Datadog Error Tracking issues via API - find grou
 
 ```bash
 # Search issues by service (last 7 days)
-dd search-et-issues 'service:ba-fulfillment-*' --from now-7d
+dd search-et-issues 'service:my-service-*' --from now-7d
 
 # Search with specific error type
 dd search-et-issues 'service:my-service AND @error.type:NullPointerException' --from now-1d

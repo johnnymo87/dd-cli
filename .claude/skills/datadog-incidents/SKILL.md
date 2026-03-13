@@ -34,8 +34,8 @@ Transforms user references:
     "type": "users",
     "id": "0082a465-...",
     "attributes": {
-      "name": "Peter Chang",
-      "email": "peterc@wonder.com"
+      "name": "Jane Doe",
+      "email": "jdoe@example.com"
     }
   }
 }

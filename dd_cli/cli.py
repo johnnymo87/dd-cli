@@ -411,7 +411,7 @@ def create_log_metric_cmd(
     logs and is available as a custom metric for dashboards and monitors.
 
     Example: dd create-log-metric kafka.unknown_topic_errors \\
-        --query 'service:ba-fulfillment-worker UNKNOWN_TOPIC_OR_PARTITION' \\
+        --query 'service:my-worker UNKNOWN_TOPIC_OR_PARTITION' \\
         --group-by service --group-by env
     """
     group_by_list = [{"path": g, "tag_name": g.lstrip("@")} for g in group_by] or None
@@ -502,7 +502,7 @@ def create_monitor_cmd(
             --query 'sum(last_5m):sum:kafka.unknown_topic_errors{env:prod}.as_count() > 100' \\
             --message '{{#is_alert}}Kafka UNKNOWN_TOPIC errors > {{threshold}}{{/is_alert}} @slack-alerts' \\
             --critical 100 --warning 50 \\
-            --tag team:fulfillment --tag service:ba-fulfillment-worker
+            --tag team:my-team --tag service:my-service
     """
     options: dict[str, Any] = {
         "notify_no_data": notify_no_data,
@@ -689,7 +689,7 @@ def search_et_issues_cmd(
 ) -> None:
     """Search error tracking issues.
 
-    Example: dd search-et-issues 'service:ba-fulfillment-*' --from now-7d
+    Example: dd search-et-issues 'service:my-service-*' --from now-7d
 
     \b
     Query uses Datadog search syntax:

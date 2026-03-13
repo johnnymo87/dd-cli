@@ -372,6 +372,250 @@ def _output_logs(logs: list[dict[str, Any]], output_format: str) -> None:
                 click.echo(message)
 
 
+@cli.command("create-log-metric")
+@click.argument("metric_id", metavar="METRIC_ID")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--query",
+    required=True,
+    help="Log search query (same syntax as Log Explorer)",
+)
+@click.option(
+    "--group-by",
+    multiple=True,
+    help="Group by attribute path (can be repeated, e.g., --group-by service --group-by env)",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def create_log_metric_cmd(
+    metric_id: str,
+    site: str,
+    query: str,
+    group_by: tuple[str, ...],
+    timeout: float,
+) -> None:
+    """Create a log-based count metric (computed at ingestion time).
+
+    Works with all storage tiers including flex. The metric counts matching
+    logs and is available as a custom metric for dashboards and monitors.
+
+    Example: dd create-log-metric kafka.unknown_topic_errors \\
+        --query 'service:ba-fulfillment-worker UNKNOWN_TOPIC_OR_PARTITION' \\
+        --group-by service --group-by env
+    """
+    group_by_list = [{"path": g, "tag_name": g.lstrip("@")} for g in group_by] or None
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.create_log_metric(
+                metric_id=metric_id,
+                query=query,
+                group_by=group_by_list,
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
+@cli.command("create-monitor")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option("--name", required=True, help="Monitor name")
+@click.option(
+    "--type",
+    "monitor_type",
+    required=True,
+    help="Monitor type (e.g., 'metric alert', 'log alert', 'query alert')",
+)
+@click.option("--query", required=True, help="Monitor query")
+@click.option(
+    "--message",
+    required=True,
+    help="Notification message (supports @slack-channel, @pagerduty-service, template vars)",
+)
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Monitor tag (can be repeated, e.g., --tag team:fulfillment --tag env:prod)",
+)
+@click.option("--critical", type=float, help="Critical threshold")
+@click.option("--warning", type=float, help="Warning threshold")
+@click.option("--priority", type=int, help="Monitor priority (1-5)")
+@click.option(
+    "--renotify-interval",
+    type=int,
+    help="Minutes between re-notifications (0 to disable)",
+)
+@click.option(
+    "--notify-no-data/--no-notify-no-data",
+    default=False,
+    help="Alert when no data is received",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def create_monitor_cmd(
+    site: str,
+    name: str,
+    monitor_type: str,
+    query: str,
+    message: str,
+    tags: tuple[str, ...],
+    critical: float | None,
+    warning: float | None,
+    priority: int | None,
+    renotify_interval: int | None,
+    notify_no_data: bool,
+    timeout: float,
+) -> None:
+    """Create a Datadog monitor.
+
+    Example (metric monitor on a log-based metric):
+
+        dd create-monitor \\
+            --name 'BA Fulfillment: Kafka topic errors' \\
+            --type 'query alert' \\
+            --query 'sum(last_5m):sum:kafka.unknown_topic_errors{env:prod}.as_count() > 100' \\
+            --message '{{#is_alert}}Kafka UNKNOWN_TOPIC errors > {{threshold}}{{/is_alert}} @slack-alerts' \\
+            --critical 100 --warning 50 \\
+            --tag team:fulfillment --tag service:ba-fulfillment-worker
+    """
+    options: dict[str, Any] = {
+        "notify_no_data": notify_no_data,
+        "include_tags": True,
+    }
+    thresholds: dict[str, float] = {}
+    if critical is not None:
+        thresholds["critical"] = critical
+    if warning is not None:
+        thresholds["warning"] = warning
+    if thresholds:
+        options["thresholds"] = thresholds
+    if renotify_interval is not None:
+        options["renotify_interval"] = renotify_interval
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.create_monitor(
+                name=name,
+                monitor_type=monitor_type,
+                query=query,
+                message=message,
+                tags=list(tags) or None,
+                options=options,
+                priority=priority,
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
+@cli.command("get-workflow")
+@click.argument("workflow_url_or_id", metavar="WORKFLOW")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--instance/--no-instance",
+    default=False,
+    help="Also fetch the instance details (if instance ID is in the URL)",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def get_workflow_cmd(
+    workflow_url_or_id: str,
+    site: str,
+    instance: bool,
+    timeout: float,
+) -> None:
+    """Get a workflow definition (and optionally an instance) by ID or URL.
+
+    Accepts either a UUID or a full Datadog workflow URL:
+
+        dd get-workflow 65794522-c1c3-42c9-86db-222aa5272ac7
+
+        dd get-workflow 'https://us3.datadoghq.com/workflow/65794522-...' --instance
+    """
+    workflow_id, instance_id = _parse_workflow_ref(workflow_url_or_id)
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.get_workflow(workflow_id)
+
+            if instance and instance_id:
+                instance_data = dd.get_workflow_instance(workflow_id, instance_id)
+                data["instance"] = instance_data
+
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
+def _parse_workflow_ref(ref: str) -> tuple[str, str | None]:
+    """Parse a workflow URL or UUID into (workflow_id, instance_id | None).
+
+    Supports:
+        - Plain UUID: '65794522-c1c3-42c9-86db-222aa5272ac7'
+        - Full URL:   'https://us3.datadoghq.com/workflow/65794522-...?instance=f5a2ef10-...'
+    """
+    import urllib.parse
+
+    if ref.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(ref)
+        # Path is like /workflow/65794522-c1c3-42c9-86db-222aa5272ac7
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 2 and path_parts[0] == "workflow":
+            workflow_id = path_parts[1]
+        else:
+            raise click.UsageError(
+                f"Cannot parse workflow ID from URL: {ref}"
+            )
+        qs = urllib.parse.parse_qs(parsed.query)
+        instance_id = qs.get("instance", [None])[0]
+        return workflow_id, instance_id
+
+    return ref, None
+
+
 def main() -> None:
     cli()
 

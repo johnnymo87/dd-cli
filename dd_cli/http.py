@@ -196,3 +196,102 @@ class DatadogClient:
     def validate(self) -> dict[str, Any]:
         """Validate API key. Note: only requires API key, not app key."""
         return self._request("GET", "/api/v1/validate")
+
+    # ── Log-based metrics (v2) ──────────────────────────────────────
+
+    def create_log_metric(
+        self,
+        *,
+        metric_id: str,
+        query: str,
+        group_by: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Create a log-based count metric.
+
+        Metrics are computed at ingestion time, so they work regardless
+        of whether logs land in standard or flex storage tier.
+        """
+        attributes: dict[str, Any] = {
+            "compute": {"aggregation_type": "count"},
+        }
+        if query:
+            attributes["filter"] = {"query": query}
+        if group_by:
+            attributes["group_by"] = group_by
+
+        payload = {
+            "data": {
+                "id": metric_id,
+                "type": "logs_metrics",
+                "attributes": attributes,
+            }
+        }
+        return self._request(
+            "POST", "/api/v2/logs/config/metrics", json_body=payload
+        )
+
+    def get_log_metric(self, metric_id: str) -> dict[str, Any]:
+        """Get a log-based metric by ID."""
+        return self._request("GET", f"/api/v2/logs/config/metrics/{metric_id}")
+
+    def list_log_metrics(self) -> dict[str, Any]:
+        """List all log-based metrics."""
+        return self._request("GET", "/api/v2/logs/config/metrics")
+
+    def delete_log_metric(self, metric_id: str) -> dict[str, Any]:
+        """Delete a log-based metric by ID."""
+        return self._request("DELETE", f"/api/v2/logs/config/metrics/{metric_id}")
+
+    # ── Monitors (v1) ───────────────────────────────────────────────
+
+    def create_monitor(
+        self,
+        *,
+        name: str,
+        monitor_type: str,
+        query: str,
+        message: str,
+        tags: list[str] | None = None,
+        options: dict[str, Any] | None = None,
+        priority: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a monitor."""
+        payload: dict[str, Any] = {
+            "name": name,
+            "type": monitor_type,
+            "query": query,
+            "message": message,
+        }
+        if tags:
+            payload["tags"] = tags
+        if options:
+            payload["options"] = options
+        if priority is not None:
+            payload["priority"] = priority
+        return self._request("POST", "/api/v1/monitor", json_body=payload)
+
+    def search_monitors(
+        self,
+        *,
+        query: str | None = None,
+    ) -> dict[str, Any]:
+        """Search monitors."""
+        params = {}
+        if query:
+            params["query"] = query
+        return self._request("GET", "/api/v1/monitor/search", params=params)
+
+    # ── Workflows (v2) ──────────────────────────────────────────────
+
+    def get_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Get a workflow definition by ID."""
+        return self._request("GET", f"/api/v2/workflows/{workflow_id}")
+
+    def get_workflow_instance(
+        self, workflow_id: str, instance_id: str
+    ) -> dict[str, Any]:
+        """Get a workflow execution instance."""
+        return self._request(
+            "GET",
+            f"/api/v2/workflows/{workflow_id}/instances/{instance_id}",
+        )

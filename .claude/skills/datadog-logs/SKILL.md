@@ -69,7 +69,7 @@ env:prod -status:info
 
 ```bash
 # Search for UUID across services
-dd search-logs 'env:prod service:(svc-a OR svc-b) fb13dc8c-8552-429b-b2d9-8897bfdcfb0e' \
+dd search-logs 'env:prod service:(svc-a OR svc-b) aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
   --storage-tier flex --from now-30d
 
 # Find errors in last hour

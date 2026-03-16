@@ -456,7 +456,7 @@ def create_log_metric_cmd(
     "--tag",
     "tags",
     multiple=True,
-    help="Monitor tag (can be repeated, e.g., --tag team:fulfillment --tag env:prod)",
+    help="Monitor tag (can be repeated, e.g., --tag team:my-team --tag env:prod)",
 )
 @click.option("--critical", type=float, help="Critical threshold")
 @click.option("--warning", type=float, help="Warning threshold")
@@ -497,7 +497,7 @@ def create_monitor_cmd(
     Example (metric monitor on a log-based metric):
 
         dd create-monitor \\
-            --name 'BA Fulfillment: Kafka topic errors' \\
+            --name 'My Service: Kafka topic errors' \\
             --type 'query alert' \\
             --query 'sum(last_5m):sum:kafka.unknown_topic_errors{env:prod}.as_count() > 100' \\
             --message '{{#is_alert}}Kafka UNKNOWN_TOPIC errors > {{threshold}}{{/is_alert}} @slack-alerts' \\
@@ -636,9 +636,9 @@ def get_workflow_cmd(
 
     Accepts either a UUID or a full Datadog workflow URL:
 
-        dd get-workflow 65794522-c1c3-42c9-86db-222aa5272ac7
+        dd get-workflow aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
-        dd get-workflow 'https://us3.datadoghq.com/workflow/65794522-...' --instance
+        dd get-workflow 'https://us3.datadoghq.com/workflow/aaaaaaaa-...' --instance
     """
     workflow_id, instance_id = _parse_workflow_ref(workflow_url_or_id)
 
@@ -662,14 +662,14 @@ def _parse_workflow_ref(ref: str) -> tuple[str, str | None]:
     """Parse a workflow URL or UUID into (workflow_id, instance_id | None).
 
     Supports:
-        - Plain UUID: '65794522-c1c3-42c9-86db-222aa5272ac7'
-        - Full URL:   'https://us3.datadoghq.com/workflow/65794522-...?instance=f5a2ef10-...'
+        - Plain UUID: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        - Full URL:   'https://us3.datadoghq.com/workflow/aaaaaaaa-...?instance=11111111-...'
     """
     import urllib.parse
 
     if ref.startswith(("http://", "https://")):
         parsed = urllib.parse.urlparse(ref)
-        # Path is like /workflow/65794522-c1c3-42c9-86db-222aa5272ac7
+        # Path is like /workflow/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
         path_parts = parsed.path.strip("/").split("/")
         if len(path_parts) >= 2 and path_parts[0] == "workflow":
             workflow_id = path_parts[1]
@@ -808,7 +808,7 @@ def get_et_issue_cmd(
 ) -> None:
     """Get a single error tracking issue by ID.
 
-    Example: dd get-et-issue c1726a66-1f64-11ee-b338-da7ad0900002
+    Example: dd get-et-issue aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
     """
     try:
         with _get_client(site, timeout=timeout) as dd:
@@ -858,7 +858,7 @@ def update_et_issue_state_cmd(
       RESOLVED  - Mark issue as resolved
       IGNORED   - Suppress from monitors and notifications
 
-    Example: dd update-et-issue-state c1726a66-... RESOLVED
+    Example: dd update-et-issue-state aaaaaaaa-... RESOLVED
     """
     try:
         with _get_client(site, timeout=timeout) as dd:

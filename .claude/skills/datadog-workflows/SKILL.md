@@ -9,13 +9,13 @@ description: Fetch Datadog Workflow Automation definitions and instances via API
 
 ```bash
 # Get workflow by UUID
-dd get-workflow 65794522-c1c3-42c9-86db-222aa5272ac7
+dd get-workflow aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
 # Get workflow from full URL (parses workflow ID automatically)
-dd get-workflow 'https://us3.datadoghq.com/workflow/65794522-c1c3-42c9-86db-222aa5272ac7'
+dd get-workflow 'https://us3.datadoghq.com/workflow/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 
 # Include instance details (if URL has ?instance=... param)
-dd get-workflow 'https://us3.datadoghq.com/workflow/65794522-...?instance=f5a2ef10-...' --instance
+dd get-workflow 'https://us3.datadoghq.com/workflow/aaaaaaaa-...?instance=11111111-...' --instance
 ```
 
 ## Options

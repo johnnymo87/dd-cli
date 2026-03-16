@@ -21,16 +21,16 @@ dd search-et-issues 'service:my-service' --track logs
 dd search-et-issues 'service:my-service' --from now-7d --order-by TOTAL_COUNT
 
 # Get a specific issue with details
-dd get-et-issue c1726a66-1f64-11ee-b338-da7ad0900002
+dd get-et-issue aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
 # Resolve an issue
-dd update-et-issue-state c1726a66-... RESOLVED
+dd update-et-issue-state aaaaaaaa-... RESOLVED
 
 # Ignore an issue (suppresses monitor notifications)
-dd update-et-issue-state c1726a66-... IGNORED
+dd update-et-issue-state aaaaaaaa-... IGNORED
 
 # Reopen a resolved/ignored issue
-dd update-et-issue-state c1726a66-... OPEN
+dd update-et-issue-state aaaaaaaa-... OPEN
 ```
 
 ## search-et-issues Options

@@ -28,6 +28,74 @@ def mock_env():
         yield
 
 
+class TestGetMonitor:
+    """Tests for get-monitor command."""
+
+    def test_get_monitor_by_id(self, runner, mock_env):
+        """Verify get-monitor fetches a monitor by numeric ID."""
+        monitor_response = {
+            "id": 12345678,
+            "name": "High CPU usage",
+            "type": "query alert",
+            "query": "avg(last_5m):...",
+            "message": "CPU is too high",
+            "overall_state": "OK",
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_monitor.return_value = monitor_response
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["get-monitor", "12345678"])
+
+            assert result.exit_code == 0
+            mock_client.get_monitor.assert_called_once_with(
+                "12345678", group_states=None
+            )
+            output = json.loads(result.output)
+            assert output["id"] == 12345678
+            assert output["name"] == "High CPU usage"
+
+    def test_get_monitor_with_group_states(self, runner, mock_env):
+        """Verify --group-states is passed through to the API."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_monitor.return_value = {"id": 123, "overall_state": "Alert"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["get-monitor", "123", "--group-states", "alert,warn"]
+            )
+
+            assert result.exit_code == 0
+            mock_client.get_monitor.assert_called_once_with(
+                "123", group_states="alert,warn"
+            )
+
+    def test_get_monitor_from_url(self, runner, mock_env):
+        """Verify get-monitor extracts monitor ID from a full Datadog URL."""
+        url = (
+            "https://us3.datadoghq.com/monitors/12345678?group=deployment%3Amy-service"
+        )
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_monitor.return_value = {"id": 12345678}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["get-monitor", url])
+
+            assert result.exit_code == 0
+            mock_client.get_monitor.assert_called_once_with(
+                "12345678", group_states=None
+            )
+
+
 class TestSearchLogsTimeout:
     """Tests for --timeout option."""
 

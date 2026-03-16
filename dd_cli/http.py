@@ -226,9 +226,7 @@ class DatadogClient:
                 "attributes": attributes,
             }
         }
-        return self._request(
-            "POST", "/api/v2/logs/config/metrics", json_body=payload
-        )
+        return self._request("POST", "/api/v2/logs/config/metrics", json_body=payload)
 
     def get_log_metric(self, metric_id: str) -> dict[str, Any]:
         """Get a log-based metric by ID."""
@@ -280,6 +278,26 @@ class DatadogClient:
         if query:
             params["query"] = query
         return self._request("GET", "/api/v1/monitor/search", params=params)
+
+    def get_monitor(
+        self,
+        monitor_id: str,
+        *,
+        group_states: str | None = None,
+    ) -> dict[str, Any]:
+        """Get a monitor's details by ID.
+
+        Args:
+            monitor_id: The numeric monitor ID.
+            group_states: Comma-separated list of group states to include
+                (all, alert, warn, no data).
+        """
+        params: dict[str, Any] = {}
+        if group_states:
+            params["group_states"] = group_states
+        return self._request(
+            "GET", f"/api/v1/monitor/{monitor_id}", params=params or None
+        )
 
     # ── Error Tracking (v2) ────────────────────────────────────────
 

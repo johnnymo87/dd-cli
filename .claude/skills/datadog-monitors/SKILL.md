@@ -1,11 +1,47 @@
 ---
 name: datadog-monitors
-description: Create Datadog monitors via API - metric alerts, query alerts, with thresholds and Slack notifications. Use when setting up alerting on metrics or log-based metrics.
+description: Create and inspect Datadog monitors via API - get monitor details by ID or URL, create metric/query alerts with thresholds and Slack notifications. Use when setting up alerting, investigating monitor triggers, or checking monitor group states.
 ---
 
 # Datadog Monitors
 
-## CLI Command
+## Get a Monitor
+
+```bash
+# By numeric ID
+dd get-monitor 12345678
+
+# From a full Datadog URL (monitor ID extracted automatically)
+dd get-monitor 'https://us3.datadoghq.com/monitors/12345678?group=deployment%3Amy-service'
+
+# With group state details (all, alert, warn, no data)
+dd get-monitor 12345678 --group-states all
+```
+
+### get-monitor Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--group-states` | - | Comma-separated group states to include (`all`, `alert`, `warn`, `no data`) |
+| `--timeout` | `15` | Request timeout in seconds |
+
+### Key Response Fields
+
+| Field | Description |
+| --- | --- |
+| `overall_state` | Current state: `OK`, `Alert`, `Warn`, `No Data` |
+| `state.groups` | Per-group state with `last_triggered_ts`, `last_resolved_ts` (requires `--group-states`) |
+| `query` | The monitor query (metric, threshold, grouping) |
+| `options.silenced` | Muted groups with expiry timestamps |
+| `options.thresholds` | Critical/warning threshold values |
+| `message` | Notification template with Slack/PagerDuty targets |
+
+### API Details
+
+- **Endpoint**: `GET /api/v1/monitor/{monitor_id}`
+- **Auth**: Requires API key + App key
+
+## Create a Monitor
 
 ```bash
 # Metric monitor (on a log-based metric)

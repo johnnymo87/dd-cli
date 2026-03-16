@@ -33,6 +33,7 @@ dd get-incident 152 --enrich
 | `dd update-incident ID` | Update incident fields |
 | `dd create-log-metric ID` | Create a log-based count metric (works with flex tier) |
 | `dd create-monitor` | Create a monitor (metric alert, query alert, etc.) |
+| `dd get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
 | `dd search-et-issues QUERY` | Search error tracking issues by service/error type |
 | `dd get-et-issue ID` | Get a single error tracking issue with details |
@@ -69,7 +70,7 @@ These are available as Claude Code skills in `.claude/skills/`:
 - **datadog-logs** - Log search syntax, storage tiers (flex), pagination
 - **datadog-incidents** - Incident enrichment, update fields, API patterns
 - **datadog-log-metrics** - Log-based count metrics (ingestion-time, works with flex tier)
-- **datadog-monitors** - Create monitors with thresholds and Slack notifications
+- **datadog-monitors** - Create and inspect monitors (thresholds, group states, Slack notifications)
 - **datadog-workflows** - Fetch workflow definitions and execution instances
 - **datadog-error-tracking** - Search/manage error tracking issues, resolve/ignore states
 

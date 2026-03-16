@@ -537,6 +537,74 @@ def create_monitor_cmd(
     click.echo(json.dumps(data, indent=2))
 
 
+@cli.command("get-monitor")
+@click.argument("monitor_id_or_url", metavar="MONITOR")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--group-states",
+    default=None,
+    help="Comma-separated group states to include (all, alert, warn, no data)",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def get_monitor_cmd(
+    monitor_id_or_url: str,
+    site: str,
+    group_states: str | None,
+    timeout: float,
+) -> None:
+    """Get a monitor's details by ID or URL.
+
+    Accepts a numeric ID or a full Datadog monitor URL:
+
+        dd get-monitor 12345678
+
+        dd get-monitor 'https://us3.datadoghq.com/monitors/12345678?...'
+    """
+    monitor_id = _parse_monitor_ref(monitor_id_or_url)
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.get_monitor(monitor_id, group_states=group_states)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
+def _parse_monitor_ref(ref: str) -> str:
+    """Parse a monitor URL or numeric ID into a monitor ID string.
+
+    Supports:
+        - Plain ID: '12345678'
+        - Full URL: 'https://us3.datadoghq.com/monitors/12345678?group=...'
+    """
+    import urllib.parse
+
+    if ref.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(ref)
+        # Path is like /monitors/12345678
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 2 and path_parts[0] == "monitors":
+            return path_parts[1]
+        raise click.UsageError(f"Cannot parse monitor ID from URL: {ref}")
+
+    return ref
+
+
 @cli.command("get-workflow")
 @click.argument("workflow_url_or_id", metavar="WORKFLOW")
 @click.option(
@@ -606,9 +674,7 @@ def _parse_workflow_ref(ref: str) -> tuple[str, str | None]:
         if len(path_parts) >= 2 and path_parts[0] == "workflow":
             workflow_id = path_parts[1]
         else:
-            raise click.UsageError(
-                f"Cannot parse workflow ID from URL: {ref}"
-            )
+            raise click.UsageError(f"Cannot parse workflow ID from URL: {ref}")
         qs = urllib.parse.parse_qs(parsed.query)
         instance_id = qs.get("instance", [None])[0]
         return workflow_id, instance_id

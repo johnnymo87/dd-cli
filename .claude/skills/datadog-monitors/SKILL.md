@@ -1,6 +1,6 @@
 ---
 name: datadog-monitors
-description: Create and inspect Datadog monitors via API - get monitor details by ID or URL, create metric/query alerts with thresholds and Slack notifications. Use when setting up alerting, investigating monitor triggers, or checking monitor group states.
+description: Create, inspect, and update Datadog monitors via API - get monitor details by ID or URL, create or update metric/query alerts with thresholds and Slack notifications. Use when setting up alerting, tuning monitors, investigating monitor triggers, or checking monitor group states.
 ---
 
 # Datadog Monitors
@@ -64,7 +64,64 @@ dd create-monitor \
   --renotify-interval 30
 ```
 
-## Options
+## Update a Monitor
+
+```bash
+# Change the query (e.g., tune aggregator and window)
+dd update-monitor 12345678 \
+  --query 'min(last_15m):sum:my.metric{env:prod} by {host} > 0'
+
+# Update name and thresholds
+dd update-monitor 12345678 \
+  --name 'My Service: Updated alert' \
+  --critical 5 --warning 2
+
+# From a full Datadog URL
+dd update-monitor 'https://us3.datadoghq.com/monitors/12345678' \
+  --renotify-interval 30
+```
+
+Only the specified fields are updated; everything else is left unchanged.
+
+### update-monitor Options
+
+| Option | Description |
+| --- | --- |
+| `--name` | Update monitor name |
+| `--query` | Update monitor query |
+| `--message` | Update notification message |
+| `--critical` | Update critical threshold |
+| `--warning` | Update warning threshold |
+| `--priority` | Update priority (1-5) |
+| `--renotify-interval` | Minutes between re-notifications (0 to disable) |
+| `--timeout` | Request timeout in seconds |
+
+### API Details
+
+- **Endpoint**: `PUT /api/v1/monitor/{monitor_id}`
+- **Auth**: Requires API key + App key
+- **Response**: Returns full updated monitor object
+
+### Common Tuning Patterns
+
+**Reduce noise from rolling deploys** (e.g., Kubernetes pod unavailability):
+
+```bash
+# Before: max(last_10m) fires on ANY brief spike
+# After:  min(last_15m) fires only if unavailable for the ENTIRE window
+dd update-monitor 12345678 \
+  --query 'min(last_15m):sum:kubernetes_state.deployment.replicas_unavailable{kube_namespace:prod} by {deployment} > 0'
+```
+
+**Aggregator cheat sheet for tuning sensitivity:**
+
+| Aggregator | Behavior | Best for |
+| --- | --- | --- |
+| `max` | Fires on any spike in the window | High-sensitivity, never-miss alerts |
+| `avg` | Fires when average exceeds threshold | Sustained-load alerts |
+| `min` | Fires only if threshold exceeded for entire window | Filtering transient blips (deploys, restarts) |
+
+## create-monitor Options
 
 | Option | Required | Description |
 | --- | --- | --- |

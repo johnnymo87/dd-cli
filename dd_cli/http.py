@@ -268,6 +268,20 @@ class DatadogClient:
             payload["priority"] = priority
         return self._request("POST", "/api/v1/monitor", json_body=payload)
 
+    def update_monitor(
+        self,
+        monitor_id: str,
+        *,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update a monitor by ID (PUT /api/v1/monitor/{id}).
+
+        The payload should contain the fields to update (name, query,
+        message, options, tags, priority, etc.). Fields not included
+        are left unchanged by the API.
+        """
+        return self._request("PUT", f"/api/v1/monitor/{monitor_id}", json_body=payload)
+
     def search_monitors(
         self,
         *,

@@ -605,6 +605,96 @@ def _parse_monitor_ref(ref: str) -> str:
     return ref
 
 
+@cli.command("update-monitor")
+@click.argument("monitor_id_or_url", metavar="MONITOR")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option("--name", help="Update monitor name")
+@click.option("--query", help="Update monitor query")
+@click.option("--message", help="Update notification message")
+@click.option("--critical", type=float, help="Update critical threshold")
+@click.option("--warning", type=float, help="Update warning threshold")
+@click.option("--priority", type=int, help="Update priority (1-5)")
+@click.option(
+    "--renotify-interval",
+    type=int,
+    help="Minutes between re-notifications (0 to disable)",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def update_monitor_cmd(
+    monitor_id_or_url: str,
+    site: str,
+    name: str | None,
+    query: str | None,
+    message: str | None,
+    critical: float | None,
+    warning: float | None,
+    priority: int | None,
+    renotify_interval: int | None,
+    timeout: float,
+) -> None:
+    """Update a Datadog monitor by ID or URL.
+
+    Only the specified fields are updated; others are left unchanged.
+
+    Example:
+
+    \b
+        dd update-monitor 16440468 \\
+            --query 'min(last_15m):sum:my.metric{*} > 0'
+    """
+    monitor_id = _parse_monitor_ref(monitor_id_or_url)
+
+    payload: dict[str, Any] = {}
+    if name is not None:
+        payload["name"] = name
+    if query is not None:
+        payload["query"] = query
+    if message is not None:
+        payload["message"] = message
+    if priority is not None:
+        payload["priority"] = priority
+
+    options: dict[str, Any] = {}
+    thresholds: dict[str, float] = {}
+    if critical is not None:
+        thresholds["critical"] = critical
+    if warning is not None:
+        thresholds["warning"] = warning
+    if thresholds:
+        options["thresholds"] = thresholds
+    if renotify_interval is not None:
+        options["renotify_interval"] = renotify_interval
+    if options:
+        payload["options"] = options
+
+    if not payload:
+        raise click.UsageError(
+            "No updates specified. Use --help to see available options."
+        )
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.update_monitor(monitor_id, payload=payload)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
 @cli.command("get-workflow")
 @click.argument("workflow_url_or_id", metavar="WORKFLOW")
 @click.option(

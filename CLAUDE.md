@@ -4,6 +4,30 @@ CLI for Datadog APIs (incidents, logs, and more).
 
 ## Quick Start
 
+### Workstation-managed (primary)
+
+If you use the [`workstation`](https://github.com/anomalyco/workstation) repo (macOS or cloudbox),
+`dd` is already installed via home-manager activation (`uv tool install --editable`) and credentials
+(`DD_SITE`, `DD_API_KEY`, `DD_APP_KEY`) are exported by shell init (from macOS Keychain or sops-nix).
+
+```bash
+# Open a new terminal — dd is already available
+dd validate
+
+# Search logs
+dd search-logs 'env:prod service:my-service error' --from now-1h
+
+# Get incident
+dd get-incident 152 --enrich
+```
+
+Source changes are reflected immediately (editable install). Only re-run `home-manager switch` if
+`pyproject.toml` dependencies change.
+
+### Standalone (fallback)
+
+For users without the workstation setup:
+
 ```bash
 # Install
 uv venv && uv pip install -e .[dev]
@@ -65,7 +89,7 @@ Run `dd --help` or `dd <command> --help` for details.
 
 ## Skills (Detailed Guides)
 
-These are available as Claude Code skills in `.claude/skills/`:
+These are available as skills in `.claude/skills/` (Claude Code) and `.opencode/skills/` (OpenCode):
 
 - **datadog-auth** - Troubleshoot 401/403 errors, understand keys and regions
 - **datadog-logs** - Log search syntax, storage tiers (flex), pagination
@@ -77,9 +101,12 @@ These are available as Claude Code skills in `.claude/skills/`:
 
 ## Development
 
+If you use the workstation setup, `dd` itself is already installed — the steps below are only needed
+for setting up pre-commit hooks and running linting from a local virtualenv.
+
 ```bash
-# Install with dev deps
-uv pip install -e .[dev]
+# Install with dev deps (creates local .venv for pre-commit etc.)
+uv venv && uv pip install -e .[dev]
 
 # Run linting/formatting
 uv run pre-commit run --all-files

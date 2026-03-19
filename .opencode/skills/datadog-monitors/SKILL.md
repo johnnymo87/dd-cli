@@ -1,0 +1,209 @@
+---
+name: datadog-monitors
+description: Create, inspect, and update Datadog monitors via API - get monitor details by ID or URL, create or update metric/query alerts with thresholds and Slack notifications. Use when setting up alerting, tuning monitors, investigating monitor triggers, or checking monitor group states.
+---
+
+# Datadog Monitors
+
+## Get a Monitor
+
+```bash
+# By numeric ID
+dd get-monitor 12345678
+
+# From a full Datadog URL (monitor ID extracted automatically)
+dd get-monitor 'https://us3.datadoghq.com/monitors/12345678?group=deployment%3Amy-service'
+
+# With group state details (all, alert, warn, no data)
+dd get-monitor 12345678 --group-states all
+```
+
+### get-monitor Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--group-states` | - | Comma-separated group states to include (`all`, `alert`, `warn`, `no data`) |
+| `--timeout` | `15` | Request timeout in seconds |
+
+### Key Response Fields
+
+| Field | Description |
+| --- | --- |
+| `overall_state` | Current state: `OK`, `Alert`, `Warn`, `No Data` |
+| `state.groups` | Per-group state with `last_triggered_ts`, `last_resolved_ts` (requires `--group-states`) |
+| `query` | The monitor query (metric, threshold, grouping) |
+| `options.silenced` | Muted groups with expiry timestamps |
+| `options.thresholds` | Critical/warning threshold values |
+| `message` | Notification template with Slack/PagerDuty targets |
+
+### API Details
+
+- **Endpoint**: `GET /api/v1/monitor/{monitor_id}`
+- **Auth**: Requires API key + App key
+
+## Create a Monitor
+
+```bash
+# Metric monitor (on a log-based metric)
+dd create-monitor \
+  --name 'My Service: High error rate' \
+  --type 'query alert' \
+  --query 'sum(last_10m):sum:my_service.errors{env:prod}.as_count() >= 3' \
+  --message '{{#is_alert}}Error rate exceeded threshold{{/is_alert}} @slack-my-alerts' \
+  --critical 3 --warning 1 \
+  --tag team:my-team --tag service:my-service --tag env:prod
+
+# With re-notification
+dd create-monitor \
+  --name 'Critical: DB CPU' \
+  --type 'query alert' \
+  --query 'avg(last_5m):avg:system.cpu.user{service:my-db} > 90' \
+  --message '{{#is_alert}}DB CPU > 90%{{/is_alert}} @slack-incidents' \
+  --critical 90 --warning 75 \
+  --priority 1 \
+  --renotify-interval 30
+```
+
+## Update a Monitor
+
+```bash
+# Change the query (e.g., tune aggregator and window)
+dd update-monitor 12345678 \
+  --query 'min(last_15m):sum:my.metric{env:prod} by {host} > 0'
+
+# Update name and thresholds
+dd update-monitor 12345678 \
+  --name 'My Service: Updated alert' \
+  --critical 5 --warning 2
+
+# From a full Datadog URL
+dd update-monitor 'https://us3.datadoghq.com/monitors/12345678' \
+  --renotify-interval 30
+```
+
+Only the specified fields are updated; everything else is left unchanged.
+
+### update-monitor Options
+
+| Option | Description |
+| --- | --- |
+| `--name` | Update monitor name |
+| `--query` | Update monitor query |
+| `--message` | Update notification message |
+| `--critical` | Update critical threshold |
+| `--warning` | Update warning threshold |
+| `--priority` | Update priority (1-5) |
+| `--renotify-interval` | Minutes between re-notifications (0 to disable) |
+| `--timeout` | Request timeout in seconds |
+
+### API Details
+
+- **Endpoint**: `PUT /api/v1/monitor/{monitor_id}`
+- **Auth**: Requires API key + App key
+- **Response**: Returns full updated monitor object
+
+### Common Tuning Patterns
+
+**Reduce noise from rolling deploys** (e.g., Kubernetes pod unavailability):
+
+```bash
+# Before: max(last_10m) fires on ANY brief spike
+# After:  min(last_15m) fires only if unavailable for the ENTIRE window
+dd update-monitor 12345678 \
+  --query 'min(last_15m):sum:kubernetes_state.deployment.replicas_unavailable{kube_namespace:prod} by {deployment} > 0'
+```
+
+**Aggregator cheat sheet for tuning sensitivity:**
+
+| Aggregator | Behavior | Best for |
+| --- | --- | --- |
+| `max` | Fires on any spike in the window | High-sensitivity, never-miss alerts |
+| `avg` | Fires when average exceeds threshold | Sustained-load alerts |
+| `min` | Fires only if threshold exceeded for entire window | Filtering transient blips (deploys, restarts) |
+
+## create-monitor Options
+
+| Option | Required | Description |
+| --- | --- | --- |
+| `--name` | yes | Monitor name |
+| `--type` | yes | Monitor type (see below) |
+| `--query` | yes | Monitor query |
+| `--message` | yes | Notification message |
+| `--tag` | no | Monitor tag (repeatable) |
+| `--critical` | no | Critical threshold |
+| `--warning` | no | Warning threshold |
+| `--priority` | no | Priority 1-5 |
+| `--renotify-interval` | no | Minutes between re-notifications |
+| `--notify-no-data` | no | Alert on missing data |
+
+## Monitor Types
+
+| Type string | Use case |
+| --- | --- |
+| `query alert` | Metric queries, log-based metric queries |
+| `metric alert` | Simple metric threshold |
+| `log alert` | Log count (Standard Tier only, not Flex) |
+
+**For Flex Tier logs**: Use `query alert` on a log-based metric (see `datadog-log-metrics` skill).
+
+## Query Syntax for Metric Monitors
+
+```
+# Count metric over time window
+sum(last_10m):sum:my_metric{env:prod}.as_count() >= 3
+
+# Average metric
+avg(last_5m):avg:system.cpu.user{service:my-db} > 90
+
+# With group-by (multi-alert)
+sum(last_10m):sum:my_metric{env:prod} by {host}.as_count() >= 3
+```
+
+## Notification Message Syntax
+
+```
+{{#is_alert}}Alert: {{value}} > {{threshold}}{{/is_alert}}
+{{#is_warning}}Warning: {{value}} > {{warn_threshold}}{{/is_warning}}
+{{#is_recovery}}Recovered{{/is_recovery}}
+
+@slack-channel-name
+@pagerduty-ServiceName
+@user@example.com
+```
+
+## API Details
+
+- **Endpoint**: `POST /api/v1/monitor`
+- **Auth**: Requires unscoped App Key for log monitors
+- **Response**: Returns full monitor object with `id` field
+
+## Common Patterns
+
+### Flex Tier Log Alerting (two-step)
+
+```bash
+# 1. Create log-based metric (ingestion-time, works with flex)
+dd create-log-metric my_app.errors \
+  --query 'service:my-app status:error' \
+  --group-by service --group-by env
+
+# 2. Create metric monitor on it
+dd create-monitor \
+  --name 'My App: Error rate' \
+  --type 'query alert' \
+  --query 'sum(last_10m):sum:my_app.errors{env:prod}.as_count() >= 10' \
+  --message '{{#is_alert}}Errors > {{threshold}} in 10m @slack-alerts{{/is_alert}}' \
+  --critical 10 --warning 5 \
+  --tag service:my-app --tag managed-by:dd-cli
+```
+
+### Tagging for Idempotency
+
+Use `managed-by:dd-cli` and a stable `monitor-key:*` tag to find monitors later:
+
+```bash
+dd create-monitor \
+  --tag managed-by:dd-cli \
+  --tag monitor-key:my-unique-key \
+  ...
+```

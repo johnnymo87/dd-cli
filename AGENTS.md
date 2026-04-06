@@ -39,6 +39,8 @@ dd validate
 | `dd create-monitor` | Create a monitor (metric alert, query alert, etc.) |
 | `dd get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
+| `dd list-slos` | List SLOs with optional tag filtering |
+| `dd get-slo ID` | Get SLO details and history (SLI value, error budget) |
 | `dd get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
 | `dd search-et-issues QUERY` | Search error tracking issues by service/error type |
 | `dd get-et-issue ID` | Get a single error tracking issue with details |

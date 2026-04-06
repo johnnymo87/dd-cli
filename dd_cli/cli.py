@@ -695,6 +695,161 @@ def update_monitor_cmd(
     click.echo(json.dumps(data, indent=2))
 
 
+@cli.command("list-slos")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--tags",
+    default=None,
+    help="Comma-separated tags to filter by (e.g., 'env:prod,team:backend')",
+)
+@click.option("--limit", type=int, default=None, help="Max number of SLOs to return")
+@click.option("--offset", type=int, default=None, help="Pagination offset")
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def list_slos_cmd(
+    site: str,
+    tags: str | None,
+    limit: int | None,
+    offset: int | None,
+    timeout: float,
+) -> None:
+    """List SLOs with optional tag filtering.
+
+    Example: dd list-slos --tags 'env:prod,team:backend'
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.list_slos(tags=tags, limit=limit, offset=offset)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    # Extract and format a summary table
+    slos = data.get("data", [])
+    if not slos:
+        click.echo(json.dumps({"data": [], "count": 0}, indent=2))
+        return
+
+    summary = []
+    for slo in slos:
+        thresholds = slo.get("thresholds", [])
+        threshold_strs = [
+            f"{t.get('timeframe', '?')}: {t.get('target', '?')}%" for t in thresholds
+        ]
+        summary.append(
+            {
+                "id": slo.get("id"),
+                "name": slo.get("name"),
+                "type": slo.get("type"),
+                "tags": slo.get("tags", []),
+                "thresholds": threshold_strs,
+            }
+        )
+
+    click.echo(json.dumps({"data": summary, "count": len(summary)}, indent=2))
+
+
+@cli.command("get-slo")
+@click.argument("slo_id", metavar="SLO_ID")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--from",
+    "time_from",
+    default="now-7d",
+    show_default=True,
+    help="History start time (e.g., now-7d, now-30d, or epoch seconds)",
+)
+@click.option(
+    "--to",
+    "time_to",
+    default=None,
+    help="History end time (default: now)",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def get_slo_cmd(
+    slo_id: str,
+    site: str,
+    time_from: str,
+    time_to: str | None,
+    timeout: float,
+) -> None:
+    """Get a single SLO's details and recent history.
+
+    Fetches the SLO definition and its history (status, error budget,
+    SLI value) over the specified time range.
+
+    \b
+    Example:
+        dd get-slo abc123def456
+        dd get-slo abc123def456 --from now-30d
+    """
+    import time as time_mod
+
+    from_ts = _parse_time_to_epoch_s(time_from)
+    to_ts = _parse_time_to_epoch_s(time_to) if time_to else int(time_mod.time())
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            slo_data = dd.get_slo(slo_id)
+
+            try:
+                history_data = dd.get_slo_history(slo_id, from_ts=from_ts, to_ts=to_ts)
+                slo_data["history"] = history_data
+            except DatadogAPIError:
+                slo_data["history"] = {"error": "Failed to fetch SLO history"}
+
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(slo_data, indent=2))
+
+
+def _parse_time_to_epoch_s(value: str) -> int:
+    """Convert a relative time string (now-1h, now-7d) or epoch seconds to int."""
+    import re
+    import time
+
+    if value.isdigit():
+        return int(value)
+
+    m = re.match(r"now-(\d+)([mhd])", value)
+    if not m:
+        raise click.UsageError(
+            f"Invalid time format: {value}. Use 'now-1h', 'now-7d', or epoch seconds."
+        )
+    amount = int(m.group(1))
+    unit = m.group(2)
+    multipliers = {"m": 60, "h": 3600, "d": 86400}
+    offset_s = amount * multipliers[unit]
+    return int(time.time() - offset_s)
+
+
 @cli.command("get-workflow")
 @click.argument("workflow_url_or_id", metavar="WORKFLOW")
 @click.option(

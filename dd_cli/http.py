@@ -395,6 +395,56 @@ class DatadogClient:
             json_body=body,
         )
 
+    # ── SLOs (v1) ─────────────────────────────────────────────────
+
+    def list_slos(
+        self,
+        *,
+        tags: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        """List SLOs, optionally filtered by tags.
+
+        Args:
+            tags: Comma-separated tags to filter by
+                (e.g., 'env:prod,team:backend')
+            limit: Max number of SLOs to return
+            offset: Pagination offset
+        """
+        params: dict[str, Any] = {}
+        if tags:
+            params["tags"] = tags
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        return self._request("GET", "/api/v1/slo", params=params or None)
+
+    def get_slo(self, slo_id: str) -> dict[str, Any]:
+        """Get a single SLO by ID."""
+        return self._request("GET", f"/api/v1/slo/{slo_id}")
+
+    def get_slo_history(
+        self,
+        slo_id: str,
+        *,
+        from_ts: int,
+        to_ts: int,
+    ) -> dict[str, Any]:
+        """Get SLO history (status & error budget over a time range).
+
+        Args:
+            slo_id: The SLO ID
+            from_ts: Start timestamp (epoch seconds)
+            to_ts: End timestamp (epoch seconds)
+        """
+        params: dict[str, Any] = {
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+        }
+        return self._request("GET", f"/api/v1/slo/{slo_id}/history", params=params)
+
     # ── Workflows (v2) ──────────────────────────────────────────────
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:

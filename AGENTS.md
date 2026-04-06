@@ -57,6 +57,7 @@ Run `dd --help` or `dd <command> --help` for details.
 | [datadog-incidents](.opencode/skills/datadog-incidents/SKILL.md) | Incident enrichment, update fields, API patterns |
 | [datadog-log-metrics](.opencode/skills/datadog-log-metrics/SKILL.md) | Log-based count metrics (ingestion-time, works with flex tier) |
 | [datadog-monitors](.opencode/skills/datadog-monitors/SKILL.md) | Create, inspect, and update monitors (thresholds, group states, notifications) |
+| [datadog-slos](.opencode/skills/datadog-slos/SKILL.md) | List SLOs, inspect SLI values, error budgets, and threshold history |
 | [datadog-workflows](.opencode/skills/datadog-workflows/SKILL.md) | Fetch workflow definitions and execution instances |
 | [datadog-error-tracking](.opencode/skills/datadog-error-tracking/SKILL.md) | Search/manage error tracking issues, resolve/ignore states |
 

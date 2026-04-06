@@ -6,9 +6,9 @@ CLI for Datadog APIs (incidents, logs, and more).
 
 ### Workstation-managed (primary)
 
-If you use the [`workstation`](https://github.com/anomalyco/workstation) repo (macOS or cloudbox),
+If you use the workstation repo (macOS or cloudbox),
 `dd` is already installed via home-manager activation (`uv tool install --editable`) and credentials
-(`DD_SITE`, `DD_API_KEY`, `DD_APP_KEY`) are exported by shell init (from macOS Keychain or sops-nix).
+(`DD_SITE`, `DD_API_KEY`, `DD_APP_KEY`) are exported by shell init.
 
 ```bash
 # Open a new terminal — dd is already available
@@ -59,6 +59,8 @@ dd get-incident 152 --enrich
 | `dd create-monitor` | Create a monitor (metric alert, query alert, etc.) |
 | `dd get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
+| `dd list-slos` | List SLOs with optional tag filtering |
+| `dd get-slo ID` | Get SLO details and history (SLI value, error budget) |
 | `dd get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
 | `dd search-et-issues QUERY` | Search error tracking issues by service/error type |
 | `dd get-et-issue ID` | Get a single error tracking issue with details |
@@ -96,6 +98,7 @@ These are available as skills in `.claude/skills/` (Claude Code) and `.opencode/
 - **datadog-incidents** - Incident enrichment, update fields, API patterns
 - **datadog-log-metrics** - Log-based count metrics (ingestion-time, works with flex tier)
 - **datadog-monitors** - Create and inspect monitors (thresholds, group states, Slack notifications)
+- **datadog-slos** - List SLOs, inspect SLI values, error budgets, and threshold history
 - **datadog-workflows** - Fetch workflow definitions and execution instances
 - **datadog-error-tracking** - Search/manage error tracking issues, resolve/ignore states
 

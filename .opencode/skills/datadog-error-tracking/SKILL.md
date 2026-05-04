@@ -9,28 +9,28 @@ description: Search and manage Datadog Error Tracking issues via API - find grou
 
 ```bash
 # Search issues by service (last 7 days)
-dd search-et-issues 'service:my-service-*' --from now-7d
+dd-cli search-et-issues 'service:my-service-*' --from now-7d
 
 # Search with specific error type
-dd search-et-issues 'service:my-service AND @error.type:NullPointerException' --from now-1d
+dd-cli search-et-issues 'service:my-service AND @error.type:NullPointerException' --from now-1d
 
 # Search logs-based error tracking (instead of APM traces)
-dd search-et-issues 'service:my-service' --track logs
+dd-cli search-et-issues 'service:my-service' --track logs
 
 # Sort by most frequent
-dd search-et-issues 'service:my-service' --from now-7d --order-by TOTAL_COUNT
+dd-cli search-et-issues 'service:my-service' --from now-7d --order-by TOTAL_COUNT
 
 # Get a specific issue with details
-dd get-et-issue aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+dd-cli get-et-issue aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
 # Resolve an issue
-dd update-et-issue-state aaaaaaaa-... RESOLVED
+dd-cli update-et-issue-state aaaaaaaa-... RESOLVED
 
 # Ignore an issue (suppresses monitor notifications)
-dd update-et-issue-state aaaaaaaa-... IGNORED
+dd-cli update-et-issue-state aaaaaaaa-... IGNORED
 
 # Reopen a resolved/ignored issue
-dd update-et-issue-state aaaaaaaa-... OPEN
+dd-cli update-et-issue-state aaaaaaaa-... OPEN
 ```
 
 ## search-et-issues Options
@@ -78,13 +78,13 @@ error-tracking("env:prod service:my-service").source("all").impact().rollup("cou
 
 ```bash
 # Triage: find all open issues for a service, sorted by frequency
-dd search-et-issues 'service:my-service state:OPEN' --from now-7d --order-by TOTAL_COUNT
+dd-cli search-et-issues 'service:my-service state:OPEN' --from now-7d --order-by TOTAL_COUNT
 
 # Investigate: get full details on a specific issue
-dd get-et-issue <issue-id>
+dd-cli get-et-issue <issue-id>
 
 # Bulk resolve: pipe issue IDs through update
-dd search-et-issues 'service:my-service' --from now-30d | \
+dd-cli search-et-issues 'service:my-service' --from now-30d | \
   jq -r '.included[]? | select(.attributes.state == "OPEN") | .id' | \
-  xargs -I{} dd update-et-issue-state {} RESOLVED
+  xargs -I{} dd-cli update-et-issue-state {} RESOLVED
 ```

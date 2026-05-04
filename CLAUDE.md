@@ -7,18 +7,18 @@ CLI for Datadog APIs (incidents, logs, and more).
 ### Workstation-managed (primary)
 
 If you use the workstation repo (macOS or cloudbox),
-`dd` is already installed via home-manager activation (`uv tool install --editable`) and credentials
+`dd-cli` is already installed via home-manager activation (`uv tool install --editable`) and credentials
 (`DD_SITE`, `DD_API_KEY`, `DD_APP_KEY`) are exported by shell init.
 
 ```bash
-# Open a new terminal — dd is already available
-dd validate
+# Open a new terminal — dd-cli is already available
+dd-cli validate
 
 # Search logs
-dd search-logs 'env:prod service:my-service error' --from now-1h
+dd-cli search-logs 'env:prod service:my-service error' --from now-1h
 
 # Get incident
-dd get-incident 152 --enrich
+dd-cli get-incident 152 --enrich
 ```
 
 Source changes are reflected immediately (editable install). Only re-run `home-manager switch` if
@@ -38,33 +38,33 @@ export DD_API_KEY="<32-hex>"
 export DD_APP_KEY="<40-hex>"
 
 # Validate credentials
-dd validate
+dd-cli validate
 
 # Search logs
-dd search-logs 'env:prod service:my-service error' --from now-1h
+dd-cli search-logs 'env:prod service:my-service error' --from now-1h
 
 # Get incident
-dd get-incident 152 --enrich
+dd-cli get-incident 152 --enrich
 ```
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
-| `dd validate` | Validate API key |
-| `dd search-logs QUERY` | Search logs with Datadog query syntax |
-| `dd get-incident ID` | Get incident by ID (with optional `--enrich`) |
-| `dd update-incident ID` | Update incident fields |
-| `dd create-log-metric ID` | Create a log-based count metric (works with flex tier) |
-| `dd create-monitor` | Create a monitor (metric alert, query alert, etc.) |
-| `dd get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
-| `dd update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
-| `dd list-slos` | List SLOs with optional tag filtering |
-| `dd get-slo ID` | Get SLO details and history (SLI value, error budget) |
-| `dd get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
-| `dd search-et-issues QUERY` | Search error tracking issues by service/error type |
-| `dd get-et-issue ID` | Get a single error tracking issue with details |
-| `dd update-et-issue-state ID STATE` | Update issue state (OPEN, RESOLVED, IGNORED) |
+| `dd-cli validate` | Validate API key |
+| `dd-cli search-logs QUERY` | Search logs with Datadog query syntax |
+| `dd-cli get-incident ID` | Get incident by ID (with optional `--enrich`) |
+| `dd-cli update-incident ID` | Update incident fields |
+| `dd-cli create-log-metric ID` | Create a log-based count metric (works with flex tier) |
+| `dd-cli create-monitor` | Create a monitor (metric alert, query alert, etc.) |
+| `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
+| `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
+| `dd-cli list-slos` | List SLOs with optional tag filtering |
+| `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
+| `dd-cli get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
+| `dd-cli search-et-issues QUERY` | Search error tracking issues by service/error type |
+| `dd-cli get-et-issue ID` | Get a single error tracking issue with details |
+| `dd-cli update-et-issue-state ID STATE` | Update issue state (OPEN, RESOLVED, IGNORED) |
 
 ### search-logs Options
 
@@ -79,7 +79,7 @@ dd get-incident 152 --enrich
 | `--timeout` | `15` | Request timeout in seconds (increase for flex) |
 | `--format` | `json` | Output: `json`, `jsonl`, `messages` |
 
-Run `dd --help` or `dd <command> --help` for details.
+Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 ## Configuration
 
@@ -104,7 +104,7 @@ These are available as skills in `.claude/skills/` (Claude Code) and `.opencode/
 
 ## Development
 
-If you use the workstation setup, `dd` itself is already installed — the steps below are only needed
+If you use the workstation setup, `dd-cli` itself is already installed — the steps below are only needed
 for setting up pre-commit hooks and running linting from a local virtualenv.
 
 ```bash

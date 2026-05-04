@@ -18,12 +18,12 @@ This two-step approach works regardless of storage tier.
 
 ```bash
 # Create a count metric from matching logs
-dd create-log-metric my_service.error_count \
+dd-cli create-log-metric my_service.error_count \
   --query 'service:my-service status:error' \
   --group-by service --group-by env
 
 # Multiple group-by dimensions
-dd create-log-metric kafka.topic_errors \
+dd-cli create-log-metric kafka.topic_errors \
   --query 'service:my-worker "not present in metadata after 60000 ms"' \
   --group-by service --group-by env --group-by @topic
 ```
@@ -53,12 +53,12 @@ After creating the metric, create a monitor to alert on it:
 
 ```bash
 # Step 1: Create the metric
-dd create-log-metric my_app.kafka_errors \
+dd-cli create-log-metric my_app.kafka_errors \
   --query 'service:my-worker "UNKNOWN_TOPIC_OR_PARTITION"' \
   --group-by service --group-by env
 
 # Step 2: Create a metric monitor (see datadog-monitors skill)
-dd create-monitor \
+dd-cli create-monitor \
   --name 'My App: Kafka topic errors' \
   --type 'query alert' \
   --query 'sum(last_10m):sum:my_app.kafka_errors{env:prod}.as_count() >= 3' \

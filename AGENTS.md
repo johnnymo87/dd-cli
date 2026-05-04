@@ -5,14 +5,14 @@ CLI for Datadog APIs -- incidents, logs, monitors, error tracking, workflows, an
 ## Quick Start
 
 **Workstation-managed** (recommended):
-DD env vars (`DD_SITE`, `DD_API_KEY`, `DD_APP_KEY`) are set by shell init. `dd` is installed as an editable tool via home-manager activation.
+DD env vars (`DD_SITE`, `DD_API_KEY`, `DD_APP_KEY`) are set by shell init. `dd-cli` is installed as an editable tool via home-manager activation.
 
 ```bash
 # Validate credentials
-dd validate
+dd-cli validate
 
 # Search logs
-dd search-logs 'env:prod service:my-service error' --from now-1h
+dd-cli search-logs 'env:prod service:my-service error' --from now-1h
 ```
 
 **Standalone:**
@@ -24,29 +24,29 @@ export DD_SITE="us3.datadoghq.com"
 export DD_API_KEY="<32-hex>"
 export DD_APP_KEY="<40-hex>"
 
-dd validate
+dd-cli validate
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `dd validate` | Validate API key |
-| `dd search-logs QUERY` | Search logs with Datadog query syntax |
-| `dd get-incident ID` | Get incident by ID (with optional `--enrich`) |
-| `dd update-incident ID` | Update incident fields |
-| `dd create-log-metric ID` | Create a log-based count metric (works with flex tier) |
-| `dd create-monitor` | Create a monitor (metric alert, query alert, etc.) |
-| `dd get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
-| `dd update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
-| `dd list-slos` | List SLOs with optional tag filtering |
-| `dd get-slo ID` | Get SLO details and history (SLI value, error budget) |
-| `dd get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
-| `dd search-et-issues QUERY` | Search error tracking issues by service/error type |
-| `dd get-et-issue ID` | Get a single error tracking issue with details |
-| `dd update-et-issue-state ID STATE` | Update issue state (OPEN, RESOLVED, IGNORED) |
+| `dd-cli validate` | Validate API key |
+| `dd-cli search-logs QUERY` | Search logs with Datadog query syntax |
+| `dd-cli get-incident ID` | Get incident by ID (with optional `--enrich`) |
+| `dd-cli update-incident ID` | Update incident fields |
+| `dd-cli create-log-metric ID` | Create a log-based count metric (works with flex tier) |
+| `dd-cli create-monitor` | Create a monitor (metric alert, query alert, etc.) |
+| `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
+| `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
+| `dd-cli list-slos` | List SLOs with optional tag filtering |
+| `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
+| `dd-cli get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
+| `dd-cli search-et-issues QUERY` | Search error tracking issues by service/error type |
+| `dd-cli get-et-issue ID` | Get a single error tracking issue with details |
+| `dd-cli update-et-issue-state ID STATE` | Update issue state (OPEN, RESOLVED, IGNORED) |
 
-Run `dd --help` or `dd <command> --help` for details.
+Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 ## Skills
 

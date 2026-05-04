@@ -1,6 +1,6 @@
 ---
 name: datadog-incidents
-description: Work with Datadog Incidents API - fetch incidents with enrichment, update incident fields, understand incident data structures. Use when working with incidents or the dd get-incident/update-incident commands.
+description: Work with Datadog Incidents API - fetch incidents with enrichment, update incident fields, understand incident data structures. Use when working with incidents or the dd-cli get-incident/update-incident commands.
 ---
 
 # Datadog Incidents API
@@ -9,16 +9,16 @@ description: Work with Datadog Incidents API - fetch incidents with enrichment, 
 
 ```bash
 # Get incident by ID (public ID like 152, or UUID)
-dd get-incident 152
+dd-cli get-incident 152
 
 # Get enriched incident with user details
-dd get-incident 152 --include users
+dd-cli get-incident 152 --include users
 
 # Get fully enriched with incident type and integrations
-dd get-incident 152 --include users --enrich
+dd-cli get-incident 152 --include users --enrich
 
 # Update incident
-dd update-incident 152 --title "New Title" --severity SEV-2 --state resolved
+dd-cli update-incident 152 --title "New Title" --severity SEV-2 --state resolved
 ```
 
 ## Enrichment Levels
@@ -57,7 +57,7 @@ Adds `enrichment` section with:
 
 ### Custom fields
 ```bash
-dd update-incident 152 --field "root_cause=Database timeout" --field "teams=backend"
+dd-cli update-incident 152 --field "root_cause=Database timeout" --field "teams=backend"
 ```
 
 ## Key Notes

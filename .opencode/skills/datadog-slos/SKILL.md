@@ -9,13 +9,13 @@ description: List and inspect Datadog SLOs via API - view SLI values, error budg
 
 ```bash
 # List all SLOs
-dd list-slos
+dd-cli list-slos
 
 # Filter by tags
-dd list-slos --tags 'env:prod,team:backend'
+dd-cli list-slos --tags 'env:prod,team:backend'
 
 # With pagination
-dd list-slos --limit 10 --offset 20
+dd-cli list-slos --limit 10 --offset 20
 ```
 
 ### list-slos Options
@@ -35,13 +35,13 @@ Returns a summary array with `id`, `name`, `type`, `tags`, and `thresholds` for 
 
 ```bash
 # Get SLO with default 7-day history
-dd get-slo abc123def456
+dd-cli get-slo abc123def456
 
 # Get SLO with 30-day history
-dd get-slo abc123def456 --from now-30d
+dd-cli get-slo abc123def456 --from now-30d
 
 # Custom time range
-dd get-slo abc123def456 --from now-1d --to now
+dd-cli get-slo abc123def456 --from now-1d --to now
 ```
 
 ### get-slo Options
@@ -85,10 +85,10 @@ dd get-slo abc123def456 --from now-1d --to now
 
 ```bash
 # 1. Find SLOs by service tag
-dd list-slos --tags 'service:my-service'
+dd-cli list-slos --tags 'service:my-service'
 
 # 2. Check error budget for a specific SLO (30-day window)
-dd get-slo abc123def456 --from now-30d
+dd-cli get-slo abc123def456 --from now-30d
 # Look at: history.data.overall.sli_value and history.data.overall.state
 ```
 
@@ -96,7 +96,7 @@ dd get-slo abc123def456 --from now-30d
 
 ```bash
 # Check all SLOs for a team before deploying
-dd list-slos --tags 'team:my-team'
+dd-cli list-slos --tags 'team:my-team'
 # Then inspect any that look concerning:
-dd get-slo <id> --from now-7d
+dd-cli get-slo <id> --from now-7d
 ```

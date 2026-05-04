@@ -41,7 +41,7 @@ description: Troubleshoot Datadog API authentication issues (401/403 errors), un
 curl -sS -H "DD-API-KEY: $DD_API_KEY" https://api.$DD_SITE/api/v1/validate
 
 # Or use the CLI
-dd validate
+dd-cli validate
 ```
 
 ## Common Errors
@@ -54,7 +54,7 @@ dd validate
 
 ## Troubleshooting Checklist
 
-1. **API key valid?** Run `dd validate`
+1. **API key valid?** Run `dd-cli validate`
 2. **Region mismatch?** Check which site returns 200:
    ```bash
    for site in us3.datadoghq.com datadoghq.com datadoghq.eu; do

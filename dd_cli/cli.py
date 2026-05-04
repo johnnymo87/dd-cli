@@ -319,7 +319,7 @@ def search_logs_cmd(
 ) -> None:
     """Search logs with Datadog query syntax.
 
-    Example: dd-incidents search-logs 'env:prod service:(svc1 OR svc2) order-123'
+    Example: dd-cli search-logs 'env:prod service:(svc1 OR svc2) order-123'
     """
     max_pages = 50 if all_pages else 1
     cursor: str | None = None
@@ -410,7 +410,7 @@ def create_log_metric_cmd(
     Works with all storage tiers including flex. The metric counts matching
     logs and is available as a custom metric for dashboards and monitors.
 
-    Example: dd create-log-metric kafka.unknown_topic_errors \\
+    Example: dd-cli create-log-metric kafka.unknown_topic_errors \\
         --query 'service:my-worker UNKNOWN_TOPIC_OR_PARTITION' \\
         --group-by service --group-by env
     """
@@ -496,7 +496,7 @@ def create_monitor_cmd(
 
     Example (metric monitor on a log-based metric):
 
-        dd create-monitor \\
+        dd-cli create-monitor \\
             --name 'My Service: Kafka topic errors' \\
             --type 'query alert' \\
             --query 'sum(last_5m):sum:kafka.unknown_topic_errors{env:prod}.as_count() > 100' \\
@@ -568,9 +568,9 @@ def get_monitor_cmd(
 
     Accepts a numeric ID or a full Datadog monitor URL:
 
-        dd get-monitor 12345678
+        dd-cli get-monitor 12345678
 
-        dd get-monitor 'https://us3.datadoghq.com/monitors/12345678?...'
+        dd-cli get-monitor 'https://us3.datadoghq.com/monitors/12345678?...'
     """
     monitor_id = _parse_monitor_ref(monitor_id_or_url)
 
@@ -651,7 +651,7 @@ def update_monitor_cmd(
     Example:
 
     \b
-        dd update-monitor 16440468 \\
+        dd-cli update-monitor 16440468 \\
             --query 'min(last_15m):sum:my.metric{*} > 0'
     """
     monitor_id = _parse_monitor_ref(monitor_id_or_url)
@@ -726,7 +726,7 @@ def list_slos_cmd(
 ) -> None:
     """List SLOs with optional tag filtering.
 
-    Example: dd list-slos --tags 'env:prod,team:backend'
+    Example: dd-cli list-slos --tags 'env:prod,team:backend'
     """
     try:
         with _get_client(site, timeout=timeout) as dd:
@@ -804,8 +804,8 @@ def get_slo_cmd(
 
     \b
     Example:
-        dd get-slo abc123def456
-        dd get-slo abc123def456 --from now-30d
+        dd-cli get-slo abc123def456
+        dd-cli get-slo abc123def456 --from now-30d
     """
     import time as time_mod
 
@@ -881,9 +881,9 @@ def get_workflow_cmd(
 
     Accepts either a UUID or a full Datadog workflow URL:
 
-        dd get-workflow aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+        dd-cli get-workflow aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
-        dd get-workflow 'https://us3.datadoghq.com/workflow/aaaaaaaa-...' --instance
+        dd-cli get-workflow 'https://us3.datadoghq.com/workflow/aaaaaaaa-...' --instance
     """
     workflow_id, instance_id = _parse_workflow_ref(workflow_url_or_id)
 
@@ -1000,7 +1000,7 @@ def search_et_issues_cmd(
 ) -> None:
     """Search error tracking issues.
 
-    Example: dd search-et-issues 'service:my-service-*' --from now-7d
+    Example: dd-cli search-et-issues 'service:my-service-*' --from now-7d
 
     \b
     Query uses Datadog search syntax:
@@ -1053,7 +1053,7 @@ def get_et_issue_cmd(
 ) -> None:
     """Get a single error tracking issue by ID.
 
-    Example: dd get-et-issue aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    Example: dd-cli get-et-issue aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
     """
     try:
         with _get_client(site, timeout=timeout) as dd:
@@ -1103,7 +1103,7 @@ def update_et_issue_state_cmd(
       RESOLVED  - Mark issue as resolved
       IGNORED   - Suppress from monitors and notifications
 
-    Example: dd update-et-issue-state aaaaaaaa-... RESOLVED
+    Example: dd-cli update-et-issue-state aaaaaaaa-... RESOLVED
     """
     try:
         with _get_client(site, timeout=timeout) as dd:

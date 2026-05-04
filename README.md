@@ -14,13 +14,13 @@ export DD_API_KEY="<your-api-key>"
 export DD_APP_KEY="<your-app-key>"
 
 # Validate
-dd validate
+dd-cli validate
 
 # Search logs
-dd search-logs 'env:prod error' --from now-1h
+dd-cli search-logs 'env:prod error' --from now-1h
 
 # Get incident
-dd get-incident 152 --enrich
+dd-cli get-incident 152 --enrich
 ```
 
 ## Documentation

@@ -9,13 +9,13 @@ description: Create, inspect, and update Datadog monitors via API - get monitor 
 
 ```bash
 # By numeric ID
-dd get-monitor 12345678
+dd-cli get-monitor 12345678
 
 # From a full Datadog URL (monitor ID extracted automatically)
-dd get-monitor 'https://us3.datadoghq.com/monitors/12345678?group=deployment%3Amy-service'
+dd-cli get-monitor 'https://us3.datadoghq.com/monitors/12345678?group=deployment%3Amy-service'
 
 # With group state details (all, alert, warn, no data)
-dd get-monitor 12345678 --group-states all
+dd-cli get-monitor 12345678 --group-states all
 ```
 
 ### get-monitor Options
@@ -45,7 +45,7 @@ dd get-monitor 12345678 --group-states all
 
 ```bash
 # Metric monitor (on a log-based metric)
-dd create-monitor \
+dd-cli create-monitor \
   --name 'My Service: High error rate' \
   --type 'query alert' \
   --query 'sum(last_10m):sum:my_service.errors{env:prod}.as_count() >= 3' \
@@ -54,7 +54,7 @@ dd create-monitor \
   --tag team:my-team --tag service:my-service --tag env:prod
 
 # With re-notification
-dd create-monitor \
+dd-cli create-monitor \
   --name 'Critical: DB CPU' \
   --type 'query alert' \
   --query 'avg(last_5m):avg:system.cpu.user{service:my-db} > 90' \
@@ -68,16 +68,16 @@ dd create-monitor \
 
 ```bash
 # Change the query (e.g., tune aggregator and window)
-dd update-monitor 12345678 \
+dd-cli update-monitor 12345678 \
   --query 'min(last_15m):sum:my.metric{env:prod} by {host} > 0'
 
 # Update name and thresholds
-dd update-monitor 12345678 \
+dd-cli update-monitor 12345678 \
   --name 'My Service: Updated alert' \
   --critical 5 --warning 2
 
 # From a full Datadog URL
-dd update-monitor 'https://us3.datadoghq.com/monitors/12345678' \
+dd-cli update-monitor 'https://us3.datadoghq.com/monitors/12345678' \
   --renotify-interval 30
 ```
 
@@ -109,7 +109,7 @@ Only the specified fields are updated; everything else is left unchanged.
 ```bash
 # Before: max(last_10m) fires on ANY brief spike
 # After:  min(last_15m) fires only if unavailable for the ENTIRE window
-dd update-monitor 12345678 \
+dd-cli update-monitor 12345678 \
   --query 'min(last_15m):sum:kubernetes_state.deployment.replicas_unavailable{kube_namespace:prod} by {deployment} > 0'
 ```
 
@@ -183,12 +183,12 @@ sum(last_10m):sum:my_metric{env:prod} by {host}.as_count() >= 3
 
 ```bash
 # 1. Create log-based metric (ingestion-time, works with flex)
-dd create-log-metric my_app.errors \
+dd-cli create-log-metric my_app.errors \
   --query 'service:my-app status:error' \
   --group-by service --group-by env
 
 # 2. Create metric monitor on it
-dd create-monitor \
+dd-cli create-monitor \
   --name 'My App: Error rate' \
   --type 'query alert' \
   --query 'sum(last_10m):sum:my_app.errors{env:prod}.as_count() >= 10' \
@@ -202,7 +202,7 @@ dd create-monitor \
 Use `managed-by:dd-cli` and a stable `monitor-key:*` tag to find monitors later:
 
 ```bash
-dd create-monitor \
+dd-cli create-monitor \
   --tag managed-by:dd-cli \
   --tag monitor-key:my-unique-key \
   ...

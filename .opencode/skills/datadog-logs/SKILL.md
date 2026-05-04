@@ -1,6 +1,6 @@
 ---
 name: datadog-logs
-description: Search Datadog logs via API - query syntax, storage tiers (indexes, flex, online-archives), pagination. Use when searching logs or using the dd search-logs command.
+description: Search Datadog logs via API - query syntax, storage tiers (indexes, flex, online-archives), pagination. Use when searching logs or using the dd-cli search-logs command.
 ---
 
 # Datadog Logs API
@@ -9,19 +9,19 @@ description: Search Datadog logs via API - query syntax, storage tiers (indexes,
 
 ```bash
 # Basic search (last 15 minutes)
-dd search-logs 'env:prod service:my-service error'
+dd-cli search-logs 'env:prod service:my-service error'
 
 # Custom time range
-dd search-logs 'env:prod error' --from now-1h --to now
+dd-cli search-logs 'env:prod error' --from now-1h --to now
 
 # Search Flex Logs tier (for archived/long-retention logs)
-dd search-logs 'env:prod' --storage-tier flex --from now-30d
+dd-cli search-logs 'env:prod' --storage-tier flex --from now-30d
 
 # Multi-service search with OR
-dd search-logs 'env:prod service:(service-a OR service-b) order-12345' --storage-tier flex
+dd-cli search-logs 'env:prod service:(service-a OR service-b) order-12345' --storage-tier flex
 
 # Fetch all pages
-dd search-logs 'env:prod' --all-pages --limit 100
+dd-cli search-logs 'env:prod' --all-pages --limit 100
 ```
 
 ## Query Syntax
@@ -69,14 +69,14 @@ env:prod -status:info
 
 ```bash
 # Search for UUID across services
-dd search-logs 'env:prod service:(svc-a OR svc-b) aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
+dd-cli search-logs 'env:prod service:(svc-a OR svc-b) aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
   --storage-tier flex --from now-30d
 
 # Find errors in last hour
-dd search-logs 'env:prod status:error' --from now-1h
+dd-cli search-logs 'env:prod status:error' --from now-1h
 
 # Search specific host
-dd search-logs 'env:prod host:web-01 status:error'
+dd-cli search-logs 'env:prod host:web-01 status:error'
 ```
 
 ## API Details

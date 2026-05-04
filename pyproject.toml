@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-dd = "dd_cli.cli:main"
+dd-cli = "dd_cli.cli:main"
 
 [build-system]
 requires = ["hatchling"]

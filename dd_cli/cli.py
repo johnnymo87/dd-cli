@@ -1033,6 +1033,18 @@ def search_et_issues_cmd(
 @cli.command("get-et-issue")
 @click.argument("issue_id", metavar="ISSUE_ID")
 @click.option(
+    "--include",
+    "include",
+    default="assignee,case,team_owners",
+    show_default=True,
+    help=(
+        "Comma-separated relationship objects to sideload. Valid values: "
+        "assignee, case, team_owners. Pass --include '' to omit. "
+        "Note: the GET endpoint uses unprefixed names, unlike the search "
+        "endpoint which uses 'issue.assignee' etc."
+    ),
+)
+@click.option(
     "--site",
     envvar="DD_SITE",
     default=_default_site,
@@ -1048,6 +1060,7 @@ def search_et_issues_cmd(
 )
 def get_et_issue_cmd(
     issue_id: str,
+    include: str,
     site: str,
     timeout: float,
 ) -> None:
@@ -1059,7 +1072,7 @@ def get_et_issue_cmd(
         with _get_client(site, timeout=timeout) as dd:
             data = dd.get_error_tracking_issue(
                 issue_id,
-                include="issue,issue.assignee,issue.case",
+                include=include or None,
             )
     except DatadogAPIError as e:
         _handle_api_error(e)

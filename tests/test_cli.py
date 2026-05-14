@@ -96,6 +96,82 @@ class TestGetMonitor:
             )
 
 
+class TestGetEtIssue:
+    """Tests for get-et-issue command."""
+
+    def test_get_et_issue_default_include(self, runner, mock_env):
+        """Verify the default include uses the GET-endpoint's valid relationship
+        names (assignee, case, team_owners), not the search endpoint's prefixed
+        names (issue.assignee, issue.case). The wrong values cause a 400
+        'invalid include' from the Datadog API.
+        """
+        issue_response = {
+            "data": {
+                "id": "1a14f4fc-182a-11f1-994a-da7ad0900003",
+                "type": "issue",
+                "attributes": {"state": "OPEN"},
+            }
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_error_tracking_issue.return_value = issue_response
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["get-et-issue", "1a14f4fc-182a-11f1-994a-da7ad0900003"]
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.get_error_tracking_issue.assert_called_once_with(
+                "1a14f4fc-182a-11f1-994a-da7ad0900003",
+                include="assignee,case,team_owners",
+            )
+
+    def test_get_et_issue_custom_include(self, runner, mock_env):
+        """Verify --include overrides the default and is passed through."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_error_tracking_issue.return_value = {"data": {}}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                [
+                    "get-et-issue",
+                    "abc-123",
+                    "--include",
+                    "assignee",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.get_error_tracking_issue.assert_called_once_with(
+                "abc-123",
+                include="assignee",
+            )
+
+    def test_get_et_issue_no_include(self, runner, mock_env):
+        """Verify --include '' suppresses the include query param entirely."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_error_tracking_issue.return_value = {"data": {}}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["get-et-issue", "abc-123", "--include", ""])
+
+            assert result.exit_code == 0, result.output
+            mock_client.get_error_tracking_issue.assert_called_once_with(
+                "abc-123",
+                include=None,
+            )
+
+
 class TestSearchLogsTimeout:
     """Tests for --timeout option."""
 

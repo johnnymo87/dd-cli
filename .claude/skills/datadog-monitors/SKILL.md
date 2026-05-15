@@ -5,6 +5,46 @@ description: Create, inspect, and update Datadog monitors via API - get monitor 
 
 # Datadog Monitors
 
+## List Monitors
+
+```bash
+# All monitors managed by dd-cli (most common discovery query)
+dd-cli list-monitors --tag managed-by:dd-cli
+
+# Multiple tags AND together (DD-side comma-join)
+dd-cli list-monitors --tag managed-by:dd-cli --tag team:platform
+
+# Substring name search (server-side, case-insensitive)
+dd-cli list-monitors --name kafka --max-results 50
+
+# Bulk dump for jq processing -- jsonl emits one full monitor per line
+dd-cli list-monitors --tag managed-by:dd-cli --format jsonl | \
+  jq -r 'select(.overall_state == "Alert") | "\(.id)\t\(.name)"'
+
+# Full payloads in a single JSON wrapper
+dd-cli list-monitors --tag team:platform --format json
+```
+
+### list-monitors Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--tag` | - | Filter by *monitor's own* tag (repeatable, AND-combined). Not the watched-resource tags. |
+| `--name` | - | Filter by name substring (server-side, case-insensitive) |
+| `--max-results` | `1000` | Cap total results. Auto-pagination stops here even if more pages exist. |
+| `--format` | `summary` | Output: `summary` (id/name/type/overall_state/tags), `json` (full, wrapped), `jsonl` (full, one per line) |
+| `--timeout` | `15` | Request timeout in seconds |
+
+**Tag flavors gotcha:** `--tag` filters by the monitor's own tags (e.g., `managed-by:dd-cli`, `team:platform`). The Datadog API distinguishes these from `monitor_tags` (tags on the resources the monitor watches, like `env:prod`); the latter is not exposed yet — file an issue if you need it.
+
+**Pagination:** auto-paginates 1000 monitors per page until `--max-results` is reached or a short page is returned. With the default cap of 1000, only one API call is made.
+
+### API Details
+
+- **Endpoint**: `GET /api/v1/monitor`
+- **Auth**: API key + App key
+- **Returns**: bare JSON array (no wrapper), unlike most v2 endpoints
+
 ## Get a Monitor
 
 ```bash

@@ -293,6 +293,43 @@ class DatadogClient:
             params["query"] = query
         return self._request("GET", "/api/v1/monitor/search", params=params)
 
+    def list_monitors(
+        self,
+        *,
+        tags: list[str] | None = None,
+        name: str | None = None,
+        page: int = 0,
+        page_size: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List monitors (single page).
+
+        The v1 list endpoint returns a bare JSON array (not a wrapped object).
+        Pagination is page-based: pass `page=N` to fetch the (N+1)th page.
+        Datadog silently caps `page_size` at 1000.
+
+        Args:
+            tags: Filter by monitor tags. Multiple values are AND-combined
+                (DD-side comma join). These are the *monitor's own* tags
+                (e.g., 'managed-by:dd-cli'), not the tags on the resources
+                the monitor watches.
+            name: Substring match on the monitor name (case-insensitive,
+                handled DD-side).
+            page: Zero-indexed page number.
+            page_size: Number of monitors per page (max 1000).
+        """
+        params: dict[str, Any] = {
+            "page": page,
+            "page_size": page_size,
+        }
+        if tags:
+            params["tags"] = ",".join(tags)
+        if name:
+            params["name"] = name
+        # The v1 list endpoint returns a bare JSON array, not a wrapped object.
+        # _request is typed as -> dict for the common case; cast accordingly.
+        result: Any = self._request("GET", "/api/v1/monitor", params=params)
+        return result if isinstance(result, list) else []
+
     def get_monitor(
         self,
         monitor_id: str,

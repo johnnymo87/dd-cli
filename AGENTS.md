@@ -38,6 +38,7 @@ dd-cli validate
 | `dd-cli create-log-metric ID` | Create a log-based count metric (works with flex tier) |
 | `dd-cli create-monitor` | Create a monitor (metric alert, query alert, etc.) |
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
+| `dd-cli list-monitors` | List monitors, filtered by tag and/or name (auto-paginates) |
 | `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
 | `dd-cli list-slos` | List SLOs with optional tag filtering |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |

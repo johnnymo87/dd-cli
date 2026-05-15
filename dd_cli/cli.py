@@ -605,6 +605,133 @@ def _parse_monitor_ref(ref: str) -> str:
     return ref
 
 
+_MONITOR_SUMMARY_FIELDS = ("id", "name", "type", "overall_state", "tags")
+
+
+def _monitor_summary(monitor: dict[str, Any]) -> dict[str, Any]:
+    """Project a monitor down to the summary fields used by the default
+    --format summary output."""
+    return {field: monitor.get(field) for field in _MONITOR_SUMMARY_FIELDS}
+
+
+@cli.command("list-monitors")
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help=(
+        "Filter by monitor tag (repeatable, AND-combined). "
+        "E.g., --tag managed-by:dd-cli --tag team:platform. "
+        "These are the monitor's own tags, not tags on the watched resources."
+    ),
+)
+@click.option(
+    "--name",
+    default=None,
+    help="Filter by monitor name (substring, case-insensitive, server-side).",
+)
+@click.option(
+    "--max-results",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="Stop fetching after this many results.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+    help=(
+        "Output format. summary: {id, name, type, overall_state, tags} per "
+        "monitor. json: full monitor objects wrapped in {count, data}. "
+        "jsonl: one full monitor per line, no wrapper."
+    ),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def list_monitors_cmd(
+    tags: tuple[str, ...],
+    name: str | None,
+    max_results: int,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """List monitors, optionally filtered by tag and/or name.
+
+    Auto-paginates through all results up to --max-results (default 1000).
+
+    \b
+    Examples:
+      # All monitors managed by dd-cli
+      dd-cli list-monitors --tag managed-by:dd-cli
+
+      # Monitors for a team, by name substring
+      dd-cli list-monitors --tag team:platform --name kafka
+
+      # Bulk dump for jq processing
+      dd-cli list-monitors --tag managed-by:dd-cli --format jsonl | \\
+        jq 'select(.overall_state == "Alert") | .id'
+    """
+    page_size = 1000
+    tag_list = list(tags) if tags else None
+    monitors: list[dict[str, Any]] = []
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            page = 0
+            while True:
+                batch = dd.list_monitors(
+                    tags=tag_list,
+                    name=name,
+                    page=page,
+                    page_size=page_size,
+                )
+                monitors.extend(batch)
+
+                if len(monitors) >= max_results:
+                    monitors = monitors[:max_results]
+                    break
+
+                # A short page means we've reached the end.
+                if len(batch) < page_size:
+                    break
+
+                page += 1
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    _output_monitors(monitors, output_format)
+
+
+def _output_monitors(monitors: list[dict[str, Any]], output_format: str) -> None:
+    """Output monitors in the specified format."""
+    if output_format == "summary":
+        summary = [_monitor_summary(m) for m in monitors]
+        click.echo(json.dumps({"count": len(summary), "data": summary}, indent=2))
+    elif output_format == "json":
+        click.echo(json.dumps({"count": len(monitors), "data": monitors}, indent=2))
+    elif output_format == "jsonl":
+        for m in monitors:
+            click.echo(json.dumps(m))
+
+
 @cli.command("update-monitor")
 @click.argument("monitor_id_or_url", metavar="MONITOR")
 @click.option(

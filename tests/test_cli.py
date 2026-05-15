@@ -96,6 +96,212 @@ class TestGetMonitor:
             )
 
 
+class TestListMonitors:
+    """Tests for list-monitors command."""
+
+    def _full_monitor(self, monitor_id: int, **overrides: object) -> dict:
+        """Build a representative full-shape monitor object."""
+        m = {
+            "id": monitor_id,
+            "name": f"Monitor {monitor_id}",
+            "type": "query alert",
+            "overall_state": "OK",
+            "tags": ["managed-by:dd-cli", "team:platform"],
+            "query": "avg(last_5m):avg:system.cpu.user{*} > 80",
+            "message": "CPU is high @slack-alerts",
+            "options": {"thresholds": {"critical": 80, "warning": 60}},
+            "creator": {"name": "dev"},
+            "created": "2024-01-01T00:00:00Z",
+        }
+        m.update(overrides)
+        return m
+
+    def test_list_monitors_default_summary_format(self, runner, mock_env):
+        """Default --format summary returns only id/name/type/overall_state/tags."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_monitors.return_value = [
+                self._full_monitor(1),
+                self._full_monitor(2, overall_state="Alert"),
+            ]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-monitors"])
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.output)
+            assert output["count"] == 2
+            assert output["data"] == [
+                {
+                    "id": 1,
+                    "name": "Monitor 1",
+                    "type": "query alert",
+                    "overall_state": "OK",
+                    "tags": ["managed-by:dd-cli", "team:platform"],
+                },
+                {
+                    "id": 2,
+                    "name": "Monitor 2",
+                    "type": "query alert",
+                    "overall_state": "Alert",
+                    "tags": ["managed-by:dd-cli", "team:platform"],
+                },
+            ]
+
+    def test_list_monitors_tag_filter_passed_through(self, runner, mock_env):
+        """Multiple --tag flags are joined with commas (AND semantics)."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_monitors.return_value = []
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                [
+                    "list-monitors",
+                    "--tag",
+                    "managed-by:dd-cli",
+                    "--tag",
+                    "team:platform",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_monitors.assert_called_once_with(
+                tags=["managed-by:dd-cli", "team:platform"],
+                name=None,
+                page=0,
+                page_size=1000,
+            )
+
+    def test_list_monitors_name_filter_passed_through(self, runner, mock_env):
+        """--name is forwarded as the name kwarg."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_monitors.return_value = []
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-monitors", "--name", "kafka"])
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_monitors.assert_called_once_with(
+                tags=None,
+                name="kafka",
+                page=0,
+                page_size=1000,
+            )
+
+    def test_list_monitors_auto_paginates(self, runner, mock_env):
+        """When --max-results allows it, a full first page triggers fetching
+        the next page until a short page is returned."""
+        full_page = [self._full_monitor(i) for i in range(1000)]
+        partial_page = [self._full_monitor(i) for i in range(1000, 1050)]
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_monitors.side_effect = [full_page, partial_page]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-monitors", "--max-results", "5000"])
+
+            assert result.exit_code == 0, result.output
+            assert mock_client.list_monitors.call_count == 2
+            # Page numbers should advance 0 -> 1
+            assert mock_client.list_monitors.call_args_list[0].kwargs["page"] == 0
+            assert mock_client.list_monitors.call_args_list[1].kwargs["page"] == 1
+            output = json.loads(result.output)
+            assert output["count"] == 1050
+
+    def test_list_monitors_default_max_results_caps_at_1000(self, runner, mock_env):
+        """Default --max-results=1000 caps after the first full page,
+        even if more pages exist on the API side."""
+        full_page = [self._full_monitor(i) for i in range(1000)]
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_monitors.side_effect = [full_page]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-monitors"])
+
+            assert result.exit_code == 0, result.output
+            # Only one API call — we hit the cap and stopped.
+            assert mock_client.list_monitors.call_count == 1
+            output = json.loads(result.output)
+            assert output["count"] == 1000
+
+    def test_list_monitors_max_results_truncates(self, runner, mock_env):
+        """--max-results caps the total returned, even when more would fit
+        in the next page."""
+        page1 = [self._full_monitor(i) for i in range(1000)]
+        page2 = [self._full_monitor(i) for i in range(1000, 2000)]
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_monitors.side_effect = [page1, page2]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-monitors", "--max-results", "1500"])
+
+            assert result.exit_code == 0, result.output
+            # Both pages fetched (first was full, can't tell if more without asking)
+            assert mock_client.list_monitors.call_count == 2
+            output = json.loads(result.output)
+            assert output["count"] == 1500
+
+    def test_list_monitors_format_jsonl(self, runner, mock_env):
+        """--format jsonl emits one full monitor per line, no wrapper."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_monitors.return_value = [
+                self._full_monitor(1),
+                self._full_monitor(2),
+            ]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-monitors", "--format", "jsonl"])
+
+            assert result.exit_code == 0, result.output
+            lines = result.output.strip().split("\n")
+            assert len(lines) == 2
+            m1 = json.loads(lines[0])
+            m2 = json.loads(lines[1])
+            assert m1["id"] == 1
+            # Full payload, not summary
+            assert "query" in m1 and "message" in m1
+            assert m2["id"] == 2
+
+    def test_list_monitors_format_json_full(self, runner, mock_env):
+        """--format json emits {count, data: [<full monitor>, ...]}."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_monitors.return_value = [self._full_monitor(1)]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-monitors", "--format", "json"])
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.output)
+            assert output["count"] == 1
+            # Full payload, not summary
+            assert "query" in output["data"][0]
+            assert "message" in output["data"][0]
+            assert "options" in output["data"][0]
+
+
 class TestGetEtIssue:
     """Tests for get-et-issue command."""
 

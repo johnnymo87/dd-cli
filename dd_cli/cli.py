@@ -389,7 +389,7 @@ def _output_logs(logs: list[dict[str, Any]], output_format: str) -> None:
 @click.option(
     "--group-by",
     multiple=True,
-    help="Group by attribute path (can be repeated, e.g., --group-by service --group-by env)",
+    help="Group by attribute path (repeatable, e.g., --group-by service)",
 )
 @click.option(
     "--timeout",
@@ -450,7 +450,7 @@ def create_log_metric_cmd(
 @click.option(
     "--message",
     required=True,
-    help="Notification message (supports @slack-channel, @pagerduty-service, template vars)",
+    help="Notification message (supports @slack, @pagerduty, template vars)",
 )
 @click.option(
     "--tag",
@@ -499,8 +499,8 @@ def create_monitor_cmd(
         dd-cli create-monitor \\
             --name 'My Service: Kafka topic errors' \\
             --type 'query alert' \\
-            --query 'sum(last_5m):sum:kafka.unknown_topic_errors{env:prod}.as_count() > 100' \\
-            --message '{{#is_alert}}Kafka UNKNOWN_TOPIC errors > {{threshold}}{{/is_alert}} @slack-alerts' \\
+            --query 'sum(last_5m):sum:kafka.errors{env:prod}.as_count() > 100' \\
+            --message '{{#is_alert}}Kafka errors > {{threshold}}{{/is_alert}} @slack' \\
             --critical 100 --warning 50 \\
             --tag team:my-team --tag service:my-service
     """
@@ -730,6 +730,195 @@ def _output_monitors(monitors: list[dict[str, Any]], output_format: str) -> None
     elif output_format == "jsonl":
         for m in monitors:
             click.echo(json.dumps(m))
+
+
+@cli.command("list-catalog-entities")
+@click.option("--kind", default=None, help="Filter by entity kind, e.g. service.")
+@click.option("--owner", default=None, help="Filter by owner/team handle.")
+@click.option("--name", default=None, help="Filter by entity name.")
+@click.option(
+    "--ref",
+    "entity_ref",
+    default=None,
+    help="Filter by entity ref, e.g. service:dispatcher.",
+)
+@click.option(
+    "--include",
+    "includes",
+    multiple=True,
+    type=click.Choice(["schema", "raw_schema", "oncall", "incident", "relation"]),
+    help="Include relationship data; repeatable.",
+)
+@click.option("--include-discovered", is_flag=True, help="Include discovered entities.")
+@click.option("--max-results", type=int, default=1000, show_default=True)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "summary", "jsonl"]),
+    default="json",
+    show_default=True,
+)
+@click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True)
+def list_catalog_entities_cmd(
+    kind: str | None,
+    owner: str | None,
+    name: str | None,
+    entity_ref: str | None,
+    includes: tuple[str, ...],
+    include_discovered: bool,
+    max_results: int,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """List Software Catalog entities."""
+    page_size = 100
+    entities: list[dict[str, Any]] = []
+    included: list[dict[str, Any]] = []
+    include_list = list(includes) if includes else None
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            offset = 0
+            while True:
+                limit = min(page_size, max_results - len(entities))
+                if limit <= 0:
+                    break
+
+                page = dd.list_catalog_entities(
+                    kind=kind,
+                    owner=owner,
+                    name=name,
+                    ref=entity_ref,
+                    include=include_list,
+                    include_discovered=include_discovered,
+                    offset=offset,
+                    limit=limit,
+                )
+                batch = page.get("data", [])
+                entities.extend(batch)
+                included.extend(page.get("included", []))
+
+                if len(entities) >= max_results:
+                    entities = entities[:max_results]
+                    break
+                if len(batch) < limit:
+                    break
+                offset += len(batch)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    _output_catalog_entities(entities, included, output_format)
+
+
+@cli.command("get-catalog-entity")
+@click.argument("ref", metavar="REF")
+@click.option(
+    "--kind", default=None, help="Entity kind to use when REF is a bare name."
+)
+@click.option(
+    "--include",
+    "includes",
+    multiple=True,
+    type=click.Choice(["schema", "raw_schema", "oncall", "incident", "relation"]),
+    help="Include relationship data; repeatable.",
+)
+@click.option("--include-discovered", is_flag=True, help="Include discovered entities.")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "summary"]),
+    default="json",
+    show_default=True,
+)
+@click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True)
+def get_catalog_entity_cmd(
+    ref: str,
+    kind: str | None,
+    includes: tuple[str, ...],
+    include_discovered: bool,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Get a single Software Catalog entity by ref or name."""
+    entity_ref = ref if ":" in ref else None
+    name = None if entity_ref else ref
+    include_list = list(includes) if includes else None
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            page = dd.list_catalog_entities(
+                kind=kind,
+                owner=None,
+                name=name,
+                ref=entity_ref,
+                include=include_list,
+                include_discovered=include_discovered,
+                offset=0,
+                limit=2,
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    entities = page.get("data", [])
+    if not entities:
+        raise click.ClickException(f"No catalog entity found for {ref}")
+    if len(entities) > 1:
+        raise click.ClickException(
+            f"Multiple catalog entities matched {ref}; add --kind"
+        )
+
+    entity = entities[0]
+    if output_format == "summary":
+        click.echo(json.dumps({"data": _catalog_entity_summary(entity)}, indent=2))
+    else:
+        output: dict[str, Any] = {"data": entity}
+        included = page.get("included", [])
+        if included:
+            output["included"] = included
+        click.echo(json.dumps(output, indent=2))
+
+
+def _output_catalog_entities(
+    entities: list[dict[str, Any]],
+    included: list[dict[str, Any]],
+    output_format: str,
+) -> None:
+    if output_format == "jsonl":
+        for entity in entities:
+            click.echo(json.dumps(entity))
+        return
+
+    if output_format == "summary":
+        data = [_catalog_entity_summary(entity) for entity in entities]
+        click.echo(json.dumps({"count": len(data), "data": data}, indent=2))
+        return
+
+    output: dict[str, Any] = {"count": len(entities), "data": entities}
+    if included:
+        output["included"] = included
+    click.echo(json.dumps(output, indent=2))
+
+
+def _catalog_entity_summary(entity: dict[str, Any]) -> dict[str, Any]:
+    attrs = entity.get("attributes") or {}
+    meta = entity.get("meta") or {}
+    return {
+        "id": entity.get("id"),
+        "ref": attrs.get("ref") or entity.get("id"),
+        "kind": attrs.get("kind"),
+        "name": attrs.get("name"),
+        "owner": attrs.get("owner"),
+        "tags": attrs.get("tags", []),
+        "ingestion_source": meta.get("ingestionSource"),
+    }
 
 
 @cli.command("update-monitor")

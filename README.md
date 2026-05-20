@@ -21,6 +21,12 @@ dd-cli search-logs 'env:prod error' --from now-1h
 
 # Get incident
 dd-cli get-incident 152 --enrich
+
+# List Software Catalog services owned by a team
+dd-cli list-catalog-entities --kind service --owner supply-chain --include raw_schema
+
+# Fetch one catalog entity by ref
+dd-cli get-catalog-entity service:dispatcher --include raw_schema
 ```
 
 ## Documentation

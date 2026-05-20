@@ -197,6 +197,38 @@ class DatadogClient:
         """Validate API key. Note: only requires API key, not app key."""
         return self._request("GET", "/api/v1/validate")
 
+    def list_catalog_entities(
+        self,
+        *,
+        kind: str | None = None,
+        owner: str | None = None,
+        name: str | None = None,
+        ref: str | None = None,
+        include: list[str] | None = None,
+        include_discovered: bool = False,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List Software Catalog entities using the v2 Software Catalog API."""
+        params: dict[str, Any] = {
+            "page[offset]": offset,
+            "page[limit]": limit,
+        }
+        if kind:
+            params["filter[kind]"] = kind
+        if owner:
+            params["filter[owner]"] = owner
+        if name:
+            params["filter[name]"] = name
+        if ref:
+            params["filter[ref]"] = ref
+        if include:
+            params["include"] = ",".join(include)
+        if include_discovered:
+            params["includeDiscovered"] = True
+
+        return self._request("GET", "/api/v2/catalog/entity", params=params)
+
     # ── Log-based metrics (v2) ──────────────────────────────────────
 
     def create_log_metric(

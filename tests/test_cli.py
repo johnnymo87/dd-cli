@@ -302,6 +302,275 @@ class TestListMonitors:
             assert "options" in output["data"][0]
 
 
+class TestListCatalogEntities:
+    """Tests for list-catalog-entities command."""
+
+    def _entity(self, name: str, *, kind: str = "service", owner: str = "supply-chain"):
+        return {
+            "id": f"{kind}:{name}",
+            "type": "entity",
+            "attributes": {
+                "kind": kind,
+                "name": name,
+                "owner": owner,
+            },
+            "meta": {"ingestionSource": "github"},
+        }
+
+    def test_list_catalog_entities_passes_filters_and_includes(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.return_value = {
+                "data": [self._entity("dispatcher")]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                [
+                    "list-catalog-entities",
+                    "--kind",
+                    "service",
+                    "--owner",
+                    "supply-chain",
+                    "--name",
+                    "dispatcher",
+                    "--ref",
+                    "service:dispatcher",
+                    "--include",
+                    "schema",
+                    "--include",
+                    "raw_schema",
+                    "--include-discovered",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_catalog_entities.assert_called_once_with(
+                kind="service",
+                owner="supply-chain",
+                name="dispatcher",
+                ref="service:dispatcher",
+                include=["schema", "raw_schema"],
+                include_discovered=True,
+                offset=0,
+                limit=100,
+            )
+            output = json.loads(result.output)
+            assert output["data"][0]["attributes"]["name"] == "dispatcher"
+
+    def test_list_catalog_entities_auto_paginates_until_short_page(
+        self, runner, mock_env
+    ):
+        first_page = {"data": [self._entity(f"svc-{i}") for i in range(100)]}
+        second_page = {"data": [self._entity("last")]}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.side_effect = [first_page, second_page]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["list-catalog-entities", "--max-results", "500"]
+            )
+
+            assert result.exit_code == 0, result.output
+            assert mock_client.list_catalog_entities.call_count == 2
+            assert (
+                mock_client.list_catalog_entities.call_args_list[0].kwargs["offset"]
+                == 0
+            )
+            assert (
+                mock_client.list_catalog_entities.call_args_list[1].kwargs["offset"]
+                == 100
+            )
+            output = json.loads(result.output)
+            assert output["count"] == 101
+
+    def test_list_catalog_entities_summary_handles_null_fields(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.return_value = {
+                "data": [
+                    {
+                        "id": "service:empty",
+                        "type": "entity",
+                        "attributes": None,
+                        "meta": None,
+                    }
+                ]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["list-catalog-entities", "--format", "summary"]
+            )
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.output)
+            assert output["count"] == 1
+            assert output["data"][0]["id"] == "service:empty"
+            assert output["data"][0]["name"] is None
+
+    def test_list_catalog_entities_pagination_limits_last_page(self, runner, mock_env):
+        first_page = {"data": [self._entity(f"svc-{i}") for i in range(100)]}
+        second_page = {"data": [self._entity("last")]}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.side_effect = [first_page, second_page]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["list-catalog-entities", "--max-results", "101"]
+            )
+
+            assert result.exit_code == 0, result.output
+            assert mock_client.list_catalog_entities.call_count == 2
+            assert (
+                mock_client.list_catalog_entities.call_args_list[0].kwargs["limit"]
+                == 100
+            )
+            assert (
+                mock_client.list_catalog_entities.call_args_list[1].kwargs["limit"] == 1
+            )
+            output = json.loads(result.output)
+            assert output["count"] == 101
+
+    def test_list_catalog_entities_format_jsonl(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.return_value = {
+                "data": [
+                    self._entity("svc-1"),
+                    self._entity("svc-2"),
+                ]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-catalog-entities", "--format", "jsonl"])
+
+            assert result.exit_code == 0, result.output
+            lines = result.output.strip().split("\n")
+            assert len(lines) == 2
+            assert json.loads(lines[0])["attributes"]["name"] == "svc-1"
+            assert json.loads(lines[1])["attributes"]["name"] == "svc-2"
+
+
+class TestGetCatalogEntity:
+    def test_get_catalog_entity_uses_ref_filter(self, runner, mock_env):
+        entity = {
+            "id": "service:dispatcher",
+            "type": "entity",
+            "attributes": {
+                "kind": "service",
+                "name": "dispatcher",
+                "owner": "supply-chain",
+            },
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.return_value = {"data": [entity]}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                ["get-catalog-entity", "service:dispatcher", "--include", "raw_schema"],
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_catalog_entities.assert_called_once_with(
+                kind=None,
+                owner=None,
+                name=None,
+                ref="service:dispatcher",
+                include=["raw_schema"],
+                include_discovered=False,
+                offset=0,
+                limit=2,
+            )
+            output = json.loads(result.output)
+            assert output["data"]["id"] == "service:dispatcher"
+
+    def test_get_catalog_entity_errors_when_not_found(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.return_value = {"data": []}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["get-catalog-entity", "service:missing"])
+
+            assert result.exit_code != 0
+            assert "No catalog entity found" in result.output
+
+    def test_get_catalog_entity_help_text(self, runner):
+        result = runner.invoke(cli, ["get-catalog-entity", "--help"])
+        assert result.exit_code == 0
+        assert "Include relationship data; repeatable." in result.output
+
+    def test_get_catalog_entity_bare_name_fallback(self, runner, mock_env):
+        entity = {
+            "id": "service:dispatcher",
+            "type": "entity",
+            "attributes": {
+                "kind": "service",
+                "name": "dispatcher",
+                "owner": "supply-chain",
+            },
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.return_value = {"data": [entity]}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["get-catalog-entity", "dispatcher", "--kind", "service"]
+            )
+
+            assert result.exit_code == 0
+            mock_client.list_catalog_entities.assert_called_once_with(
+                kind="service",
+                owner=None,
+                name="dispatcher",
+                ref=None,
+                include=None,
+                include_discovered=False,
+                offset=0,
+                limit=2,
+            )
+
+    def test_get_catalog_entity_errors_on_multiple_matches(self, runner, mock_env):
+        entity1 = {"id": "service:dispatcher", "type": "entity", "attributes": {}}
+        entity2 = {"id": "db:dispatcher", "type": "entity", "attributes": {}}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.return_value = {
+                "data": [entity1, entity2]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["get-catalog-entity", "dispatcher"])
+
+            assert result.exit_code != 0
+            assert "Multiple catalog entities matched dispatcher" in result.output
+
+
 class TestGetEtIssue:
     """Tests for get-et-issue command."""
 
@@ -561,3 +830,64 @@ class TestSearchLogsFormat:
             assert "data" in output
             assert "count" in output
             assert output["count"] == 1
+
+
+class TestCatalogClient:
+    """Tests for Software Catalog client methods."""
+
+    def test_list_catalog_entities_defaults(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"data": []})
+
+            result = dd.list_catalog_entities()
+
+            assert result == {"data": []}
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v2/catalog/entity",
+                params={
+                    "page[offset]": 0,
+                    "page[limit]": 100,
+                },
+            )
+        finally:
+            dd.close()
+
+    def test_list_catalog_entities_builds_query_params(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"data": []})
+
+            result = dd.list_catalog_entities(
+                kind="service",
+                owner="supply-chain",
+                name="dispatcher",
+                ref="service:dispatcher",
+                include=["schema", "raw_schema"],
+                include_discovered=True,
+                offset=100,
+                limit=50,
+            )
+
+            assert result == {"data": []}
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v2/catalog/entity",
+                params={
+                    "page[offset]": 100,
+                    "page[limit]": 50,
+                    "filter[kind]": "service",
+                    "filter[owner]": "supply-chain",
+                    "filter[name]": "dispatcher",
+                    "filter[ref]": "service:dispatcher",
+                    "include": "schema,raw_schema",
+                    "includeDiscovered": True,
+                },
+            )
+        finally:
+            dd.close()

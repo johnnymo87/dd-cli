@@ -46,6 +46,10 @@ dd-cli validate
 | `dd-cli search-et-issues QUERY` | Search error tracking issues by service/error type |
 | `dd-cli get-et-issue ID` | Get a single error tracking issue with details |
 | `dd-cli update-et-issue-state ID STATE` | Update issue state (OPEN, RESOLVED, IGNORED) |
+| `dd-cli list-catalog-entities` | List Software Catalog entities with optional filters |
+| `dd-cli get-catalog-entity REF` | Get one Software Catalog entity by ref or name |
+
+Software Catalog commands are read-only. Source-of-truth changes should happen through repository-backed `entity.datadog.yaml` PRs, not through Datadog write APIs.
 
 Run `dd-cli --help` or `dd-cli <command> --help` for details.
 

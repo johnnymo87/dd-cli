@@ -740,7 +740,7 @@ def _output_monitors(monitors: list[dict[str, Any]], output_format: str) -> None
     "--ref",
     "entity_ref",
     default=None,
-    help="Filter by entity ref, e.g. service:dispatcher.",
+    help="Filter by entity ref, e.g. service:example-service.",
 )
 @click.option(
     "--include",

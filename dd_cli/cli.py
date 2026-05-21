@@ -942,7 +942,7 @@ def discover_catalog_files(
 
 
 def validate_catalog_file(path: Path) -> list[dict[str, Any]]:
-    import yaml
+    import yaml  # type: ignore[import-untyped]
 
     errors = []
     try:
@@ -952,14 +952,14 @@ def validate_catalog_file(path: Path) -> list[dict[str, Any]]:
         errors.append(
             {
                 "path": str(path),
-                "document": 0,
+                "document": 1,
                 "field": "yaml",
                 "message": f"YAML parsing error: {e}",
             }
         )
         return errors
 
-    for idx, doc in enumerate(documents):
+    for idx, doc in enumerate(documents, start=1):
         if not doc:
             continue
         if not isinstance(doc, dict):

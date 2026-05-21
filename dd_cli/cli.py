@@ -1097,11 +1097,6 @@ def _catalog_pagerduty_link(
     if not isinstance(service_url, str):
         return None
 
-    # Check for invalid fields under pagerduty
-    for invalid_field in ["service-name", "serviceName", "service-url"]:
-        if invalid_field in pagerduty:
-            return None
-
     kind = entry.get("kind")
     if not isinstance(kind, str):
         return None
@@ -1154,19 +1149,25 @@ def _catalog_pagerduty_link(
     default="json",
     show_default=True,
 )
-def list_catalog_pagerduty_links_cmd(paths: tuple[str, ...], output_format: str) -> None:
+def list_catalog_pagerduty_links_cmd(
+    paths: tuple[str, ...],
+    output_format: str,
+) -> None:
     """List PagerDuty links declared in local Datadog entity YAML."""
     import sys
+
     import yaml  # type: ignore[import-untyped]
 
     discovered_files = discover_catalog_files(paths)
     all_errors = []
     all_links = []
+    file_documents = {}
 
     for path in discovered_files:
         try:
             with path.open("r", encoding="utf-8") as f:
                 documents = list(yaml.safe_load_all(f))
+                file_documents[path] = documents
         except Exception as e:
             all_errors.append(
                 {
@@ -1185,10 +1186,7 @@ def list_catalog_pagerduty_links_cmd(paths: tuple[str, ...], output_format: str)
         click.echo(json.dumps(output, indent=2))
         sys.exit(1)
 
-    for path in discovered_files:
-        with path.open("r", encoding="utf-8") as f:
-            documents = list(yaml.safe_load_all(f))
-
+    for path, documents in file_documents.items():
         for idx, doc in enumerate(documents, start=1):
             if not doc or not isinstance(doc, dict):
                 continue
@@ -1208,12 +1206,12 @@ def list_catalog_pagerduty_links_cmd(paths: tuple[str, ...], output_format: str)
             click.echo(json.dumps(link))
     elif output_format == "summary":
         summary_links = []
-        for l in all_links:
+        for link in all_links:
             summary_links.append(
                 {
-                    "ref": l["ref"],
-                    "owner": l["owner"],
-                    "serviceURL": l["serviceURL"],
+                    "ref": link["ref"],
+                    "owner": link["owner"],
+                    "serviceURL": link["serviceURL"],
                 }
             )
         output_data = {

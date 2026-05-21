@@ -1270,7 +1270,7 @@ schema-version: v3
             assert output["count"] == 2
 
             links = output["data"]
-            # Should be sorted by file path and document index because of discover_catalog_files
+            # Sorted by file path and document index
             assert links[0]["name"] == "auth-service"
             assert links[0]["kind"] == "service"
             assert links[0]["ref"] == "service:auth-service"
@@ -1278,13 +1278,19 @@ schema-version: v3
             assert links[0]["tags"] == ["team:identity"]
             assert "auth.datadog.yaml" in links[0]["path"]
             assert links[0]["document"] == 1
-            assert links[0]["serviceURL"] == "https://example.pagerduty.com/services/P123456"
+            assert (
+                links[0]["serviceURL"]
+                == "https://example.pagerduty.com/services/P123456"
+            )
 
             assert links[1]["name"] == "user-db"
             assert links[1]["kind"] == "datastore"
             assert links[1]["ref"] == "datastore:user-db"
             assert links[1]["document"] == 1
-            assert links[1]["serviceURL"] == "https://example.pagerduty.com/services/P789012"
+            assert (
+                links[1]["serviceURL"]
+                == "https://example.pagerduty.com/services/P789012"
+            )
 
     def test_list_catalog_pagerduty_links_jsonl(self, runner):
         """Verify list-catalog-pagerduty-links with --format jsonl."""
@@ -1312,7 +1318,9 @@ integrations:
             assert len(lines) == 1
             link = json.loads(lines[0])
             assert link["name"] == "billing-service"
-            assert link["serviceURL"] == "https://example.pagerduty.com/services/P444444"
+            assert (
+                link["serviceURL"] == "https://example.pagerduty.com/services/P444444"
+            )
 
     def test_list_catalog_pagerduty_links_summary(self, runner):
         """Verify list-catalog-pagerduty-links with --format summary."""
@@ -1340,7 +1348,39 @@ integrations:
             assert output["count"] == 1
             summary_entry = output["data"][0]
             assert summary_entry["ref"] == "service:core-service"
-            assert summary_entry["serviceURL"] == "https://example.pagerduty.com/services/P555555"
+            assert (
+                summary_entry["serviceURL"]
+                == "https://example.pagerduty.com/services/P555555"
+            )
+
+    def test_list_catalog_pagerduty_links_with_obsolete_keys(self, runner):
+        """Verify listing works even with obsolete/invalid fields present."""
+        from pathlib import Path
+
+        with runner.isolated_filesystem():
+            content = """
+apiVersion: datadoghq.com/v1alpha1
+kind: service
+metadata:
+  name: obsolete-keys-service
+schema-version: v3
+integrations:
+  pagerduty:
+    serviceURL: https://example.pagerduty.com/services/P111111
+    service-name: my-legacy-service
+"""
+            Path("obsolete.datadog.yaml").write_text(content.strip())
+
+            result = runner.invoke(cli, ["list-catalog-pagerduty-links"])
+            assert result.exit_code == 0, result.output
+
+            output = json.loads(result.output)
+            assert output["count"] == 1
+            entry = output["data"][0]
+            assert entry["name"] == "obsolete-keys-service"
+            assert (
+                entry["serviceURL"] == "https://example.pagerduty.com/services/P111111"
+            )
 
     def test_list_catalog_pagerduty_links_yaml_error(self, runner):
         """Verify list-catalog-pagerduty-links behavior on YAML loading error."""
@@ -1365,4 +1405,3 @@ metadata:
             assert len(output["errors"]) > 0
             assert "bad.datadog.yaml" in output["errors"][0]["path"]
             assert "YAML parsing error" in output["errors"][0]["message"]
-

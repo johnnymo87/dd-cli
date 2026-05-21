@@ -578,6 +578,175 @@ class TestGetCatalogEntity:
             assert "Multiple catalog entities matched example-service" in result.output
 
 
+class TestListTeams:
+    """Tests for list-teams command."""
+
+    def _team(self, team_id: str, **overrides: object) -> dict:
+        team: dict[str, object] = {
+            "id": team_id,
+            "type": "team",
+            "attributes": {
+                "name": f"Team {team_id}",
+                "handle": f"team-{team_id}",
+                "user_count": 3,
+                "is_managed": False,
+            },
+        }
+        team.update(overrides)
+        return team
+
+    def test_list_teams_default_summary_format(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {
+                "data": [
+                    self._team("abc"),
+                    self._team(
+                        "def",
+                        attributes={
+                            "name": "Example Team",
+                            "handle": "example-team",
+                            "user_count": 5,
+                            "is_managed": True,
+                        },
+                    ),
+                ]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-teams"])
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.output)
+            assert output == {
+                "count": 2,
+                "data": [
+                    {
+                        "id": "abc",
+                        "name": "Team abc",
+                        "handle": "team-abc",
+                        "user_count": 3,
+                        "is_managed": False,
+                    },
+                    {
+                        "id": "def",
+                        "name": "Example Team",
+                        "handle": "example-team",
+                        "user_count": 5,
+                        "is_managed": True,
+                    },
+                ],
+            }
+
+    def test_list_teams_query_and_me_passed_through(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": []}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                [
+                    "list-teams",
+                    "--query",
+                    "user@example.com",
+                    "--me",
+                    "--max-results",
+                    "25",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_teams.assert_called_once_with(
+                keyword="user@example.com",
+                me=True,
+                include=None,
+                fields=None,
+                page_number=0,
+                page_size=25,
+                sort=None,
+            )
+
+    def test_list_teams_auto_paginates_until_short_page(self, runner, mock_env):
+        first_page = {"data": [self._team(str(i)) for i in range(100)]}
+        second_page = {"data": [self._team("last")]}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.side_effect = [first_page, second_page]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-teams", "--max-results", "500"])
+
+            assert result.exit_code == 0, result.output
+            assert mock_client.list_teams.call_count == 2
+            assert mock_client.list_teams.call_args_list[0].kwargs["page_number"] == 0
+            assert mock_client.list_teams.call_args_list[1].kwargs["page_number"] == 1
+            output = json.loads(result.output)
+            assert output["count"] == 101
+
+    def test_list_teams_format_jsonl(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {
+                "data": [self._team("abc"), self._team("def")]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-teams", "--format", "jsonl"])
+
+            assert result.exit_code == 0, result.output
+            lines = result.output.strip().split("\n")
+            assert len(lines) == 2
+            assert json.loads(lines[0])["id"] == "abc"
+            assert json.loads(lines[1])["id"] == "def"
+
+
+class TestFindUserTeams:
+    """Tests for find-user-teams command."""
+
+    def test_find_user_teams_uses_member_search_keyword(self, runner, mock_env):
+        team = {
+            "id": "team-1",
+            "type": "team",
+            "attributes": {
+                "name": "Example Team",
+                "handle": "example-team",
+                "user_count": 12,
+                "is_managed": True,
+            },
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [team]}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["find-user-teams", "user@example.com"])
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_teams.assert_called_once_with(
+                keyword="user@example.com",
+                me=False,
+                include=None,
+                fields=None,
+                page_number=0,
+                page_size=100,
+                sort=None,
+            )
+            output = json.loads(result.output)
+            assert output["count"] == 1
+            assert output["data"][0]["handle"] == "example-team"
+
+
 class TestGetEtIssue:
     """Tests for get-et-issue command."""
 
@@ -858,6 +1027,94 @@ class TestCatalogClient:
                 params={
                     "page[offset]": 0,
                     "page[limit]": 100,
+                },
+            )
+        finally:
+            dd.close()
+
+
+class TestTeamsClient:
+    """Tests for DatadogClient Teams methods."""
+
+    def test_list_teams_defaults(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"data": []})
+
+            result = dd.list_teams()
+
+            assert result == {"data": []}
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v2/team",
+                params={
+                    "page[number]": 0,
+                    "page[size]": 100,
+                },
+            )
+        finally:
+            dd.close()
+
+    def test_list_teams_builds_query_params(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"data": []})
+
+            result = dd.list_teams(
+                keyword="user@example.com",
+                me=True,
+                include=["team_links"],
+                fields=["handle", "name", "user_count"],
+                page_number=2,
+                page_size=50,
+                sort="name",
+            )
+
+            assert result == {"data": []}
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v2/team",
+                params={
+                    "page[number]": 2,
+                    "page[size]": 50,
+                    "filter[keyword]": "user@example.com",
+                    "filter[me]": True,
+                    "include": "team_links",
+                    "fields[team]": "handle,name,user_count",
+                    "sort": "name",
+                },
+            )
+        finally:
+            dd.close()
+
+    def test_list_team_memberships_builds_query_params(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"data": []})
+
+            result = dd.list_team_memberships(
+                "team-123",
+                keyword="Jane User",
+                page_number=1,
+                page_size=25,
+                sort="email",
+            )
+
+            assert result == {"data": []}
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v2/team/team-123/memberships",
+                params={
+                    "page[number]": 1,
+                    "page[size]": 25,
+                    "filter[keyword]": "Jane User",
+                    "sort": "email",
                 },
             )
         finally:

@@ -229,6 +229,62 @@ class DatadogClient:
 
         return self._request("GET", "/api/v2/catalog/entity", params=params)
 
+    # ── Teams (v2) ─────────────────────────────────────────────────
+
+    def list_teams(
+        self,
+        *,
+        keyword: str | None = None,
+        me: bool = False,
+        include: list[str] | None = None,
+        fields: list[str] | None = None,
+        page_number: int = 0,
+        page_size: int = 100,
+        sort: str | None = None,
+    ) -> dict[str, Any]:
+        """List Datadog Teams using the v2 Teams API."""
+        params: dict[str, Any] = {
+            "page[number]": page_number,
+            "page[size]": page_size,
+        }
+        if keyword:
+            params["filter[keyword]"] = keyword
+        if me:
+            params["filter[me]"] = True
+        if include:
+            params["include"] = ",".join(include)
+        if fields:
+            params["fields[team]"] = ",".join(fields)
+        if sort:
+            params["sort"] = sort
+
+        return self._request("GET", "/api/v2/team", params=params)
+
+    def list_team_memberships(
+        self,
+        team_id: str,
+        *,
+        keyword: str | None = None,
+        page_number: int = 0,
+        page_size: int = 100,
+        sort: str | None = None,
+    ) -> dict[str, Any]:
+        """List memberships for one Datadog Team."""
+        params: dict[str, Any] = {
+            "page[number]": page_number,
+            "page[size]": page_size,
+        }
+        if keyword:
+            params["filter[keyword]"] = keyword
+        if sort:
+            params["sort"] = sort
+
+        return self._request(
+            "GET",
+            f"/api/v2/team/{team_id}/memberships",
+            params=params,
+        )
+
     # ── Log-based metrics (v2) ──────────────────────────────────────
 
     def create_log_metric(

@@ -60,6 +60,8 @@ dd-cli get-incident 152 --enrich
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd-cli list-monitors` | List monitors, filtered by tag and/or name (auto-paginates) |
 | `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
+| `dd-cli list-teams` | List/search Datadog Teams by name, handle, or member email |
+| `dd-cli find-user-teams MEMBER` | Find Datadog Teams matching a user/member email or name |
 | `dd-cli list-slos` | List SLOs with optional tag filtering |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
 | `dd-cli get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
@@ -70,6 +72,13 @@ dd-cli get-incident 152 --enrich
 | `dd-cli get-catalog-entity REF` | Get one Software Catalog entity by ref or name |
 
 Software Catalog commands are read-only. Source-of-truth changes should happen through repository-backed `entity.datadog.yaml` PRs, not through Datadog write APIs.
+
+Teams commands are read-only. Examples:
+
+```bash
+dd-cli list-teams --query platform
+dd-cli find-user-teams user@example.com
+```
 
 ### search-logs Options
 

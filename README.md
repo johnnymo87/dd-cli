@@ -27,6 +27,10 @@ dd-cli list-catalog-entities --kind service --owner platform-team --include raw_
 
 # Fetch one catalog entity by ref
 dd-cli get-catalog-entity service:example-service --include raw_schema
+
+# Search Datadog Teams and find a user's teams
+dd-cli list-teams --query platform
+dd-cli find-user-teams user@example.com
 ```
 
 ## Documentation

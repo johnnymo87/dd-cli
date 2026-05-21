@@ -921,6 +921,188 @@ def _catalog_entity_summary(entity: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@cli.command("list-teams")
+@click.option(
+    "--query",
+    default=None,
+    help="Search by team name, team handle, or member email.",
+)
+@click.option("--me", is_flag=True, help="Only return teams for the current user.")
+@click.option(
+    "--include",
+    "includes",
+    multiple=True,
+    type=click.Choice(["team_links", "user_team_permissions"]),
+    help="Include related resources; repeatable.",
+)
+@click.option(
+    "--field",
+    "fields",
+    multiple=True,
+    help="Team attribute field to fetch; repeatable.",
+)
+@click.option(
+    "--sort",
+    type=click.Choice(["name", "-name", "user_count", "-user_count"]),
+    default=None,
+    help="Sort returned teams.",
+)
+@click.option("--max-results", type=int, default=1000, show_default=True)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+)
+@click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True)
+def list_teams_cmd(
+    query: str | None,
+    me: bool,
+    includes: tuple[str, ...],
+    fields: tuple[str, ...],
+    sort: str | None,
+    max_results: int,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """List Datadog Teams, optionally filtered by search keyword.
+
+    \b
+    Examples:
+      dd-cli list-teams
+      dd-cli list-teams --query platform
+      dd-cli list-teams --query user@example.com
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            teams = _fetch_teams(
+                dd,
+                keyword=query,
+                me=me,
+                include=list(includes) or None,
+                fields=list(fields) or None,
+                sort=sort,
+                max_results=max_results,
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    _output_teams(teams, output_format)
+
+
+@cli.command("find-user-teams")
+@click.argument("member", metavar="MEMBER")
+@click.option("--max-results", type=int, default=1000, show_default=True)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+)
+@click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True)
+def find_user_teams_cmd(
+    member: str,
+    max_results: int,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Find Datadog Teams matching a user/member email or name.
+
+    Uses the Teams API keyword filter. Datadog documents member email matching;
+    display-name matching depends on Datadog's search behavior.
+
+    Example: dd-cli find-user-teams user@example.com
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            teams = _fetch_teams(
+                dd,
+                keyword=member,
+                me=False,
+                include=None,
+                fields=None,
+                sort=None,
+                max_results=max_results,
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    _output_teams(teams, output_format)
+
+
+def _fetch_teams(
+    dd: DatadogClient,
+    *,
+    keyword: str | None,
+    me: bool,
+    include: list[str] | None,
+    fields: list[str] | None,
+    sort: str | None,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    page_size = 100
+    teams: list[dict[str, Any]] = []
+    page_number = 0
+
+    while len(teams) < max_results:
+        limit = min(page_size, max_results - len(teams))
+        if limit <= 0:
+            break
+
+        page = dd.list_teams(
+            keyword=keyword,
+            me=me,
+            include=include,
+            fields=fields,
+            page_number=page_number,
+            page_size=limit,
+            sort=sort,
+        )
+        batch = page.get("data", [])
+        teams.extend(batch)
+
+        if len(batch) < limit:
+            break
+        page_number += 1
+
+    return teams[:max_results]
+
+
+def _output_teams(teams: list[dict[str, Any]], output_format: str) -> None:
+    if output_format == "jsonl":
+        for team in teams:
+            click.echo(json.dumps(team))
+        return
+
+    if output_format == "json":
+        click.echo(json.dumps({"count": len(teams), "data": teams}, indent=2))
+        return
+
+    data = [_team_summary(team) for team in teams]
+    click.echo(json.dumps({"count": len(data), "data": data}, indent=2))
+
+
+def _team_summary(team: dict[str, Any]) -> dict[str, Any]:
+    attrs = team.get("attributes") or {}
+    return {
+        "id": team.get("id"),
+        "name": attrs.get("name"),
+        "handle": attrs.get("handle"),
+        "user_count": attrs.get("user_count"),
+        "is_managed": attrs.get("is_managed"),
+    }
+
+
 @cli.command("update-monitor")
 @click.argument("monitor_id_or_url", metavar="MONITOR")
 @click.option(

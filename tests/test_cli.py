@@ -1218,3 +1218,151 @@ integrations:
             assert err["path"] == "service.datadog.yaml"
             assert err["field"] == "integrations.pagerduty.service-name"
             assert "service-name" in err["message"]
+
+
+class TestListCatalogPagerdutyLinks:
+    """Tests for list-catalog-pagerduty-links command."""
+
+    def test_list_catalog_pagerduty_links_json_default(self, runner):
+        """Verify list-catalog-pagerduty-links JSON output format by default."""
+        from pathlib import Path
+
+        with runner.isolated_filesystem():
+            content1 = """
+apiVersion: datadoghq.com/v1alpha1
+kind: service
+metadata:
+  name: auth-service
+  tags:
+    - team:identity
+schema-version: v3
+dd-team:
+  team-handle: identity-ops
+integrations:
+  pagerduty:
+    serviceURL: https://example.pagerduty.com/services/P123456
+"""
+            content2 = """
+apiVersion: datadoghq.com/v1alpha1
+kind: datastore
+metadata:
+  name: user-db
+schema-version: v3
+integrations:
+  pagerduty:
+    serviceURL: https://example.pagerduty.com/services/P789012
+---
+apiVersion: datadoghq.com/v1alpha1
+kind: service
+metadata:
+  name: untracked-service
+schema-version: v3
+"""
+            Path("auth.datadog.yaml").write_text(content1.strip())
+            Path("db.datadog.yaml").write_text(content2.strip())
+
+            result = runner.invoke(cli, ["list-catalog-pagerduty-links"])
+            assert result.exit_code == 0, result.output
+
+            output = json.loads(result.output)
+            assert "count" in output
+            assert "data" in output
+            assert output["count"] == 2
+
+            links = output["data"]
+            # Should be sorted by file path and document index because of discover_catalog_files
+            assert links[0]["name"] == "auth-service"
+            assert links[0]["kind"] == "service"
+            assert links[0]["ref"] == "service:auth-service"
+            assert links[0]["owner"] == "identity-ops"
+            assert links[0]["tags"] == ["team:identity"]
+            assert "auth.datadog.yaml" in links[0]["path"]
+            assert links[0]["document"] == 1
+            assert links[0]["serviceURL"] == "https://example.pagerduty.com/services/P123456"
+
+            assert links[1]["name"] == "user-db"
+            assert links[1]["kind"] == "datastore"
+            assert links[1]["ref"] == "datastore:user-db"
+            assert links[1]["document"] == 1
+            assert links[1]["serviceURL"] == "https://example.pagerduty.com/services/P789012"
+
+    def test_list_catalog_pagerduty_links_jsonl(self, runner):
+        """Verify list-catalog-pagerduty-links with --format jsonl."""
+        from pathlib import Path
+
+        with runner.isolated_filesystem():
+            content = """
+apiVersion: datadoghq.com/v1alpha1
+kind: service
+metadata:
+  name: billing-service
+schema-version: v3
+integrations:
+  pagerduty:
+    serviceURL: https://example.pagerduty.com/services/P444444
+"""
+            Path("billing.datadog.yaml").write_text(content.strip())
+
+            result = runner.invoke(
+                cli, ["list-catalog-pagerduty-links", "--format", "jsonl"]
+            )
+            assert result.exit_code == 0, result.output
+
+            lines = result.output.strip().split("\n")
+            assert len(lines) == 1
+            link = json.loads(lines[0])
+            assert link["name"] == "billing-service"
+            assert link["serviceURL"] == "https://example.pagerduty.com/services/P444444"
+
+    def test_list_catalog_pagerduty_links_summary(self, runner):
+        """Verify list-catalog-pagerduty-links with --format summary."""
+        from pathlib import Path
+
+        with runner.isolated_filesystem():
+            content = """
+apiVersion: datadoghq.com/v1alpha1
+kind: service
+metadata:
+  name: core-service
+schema-version: v3
+integrations:
+  pagerduty:
+    serviceURL: https://example.pagerduty.com/services/P555555
+"""
+            Path("core.datadog.yaml").write_text(content.strip())
+
+            result = runner.invoke(
+                cli, ["list-catalog-pagerduty-links", "--format", "summary"]
+            )
+            assert result.exit_code == 0, result.output
+
+            output = json.loads(result.output)
+            assert output["count"] == 1
+            summary_entry = output["data"][0]
+            assert summary_entry["ref"] == "service:core-service"
+            assert summary_entry["serviceURL"] == "https://example.pagerduty.com/services/P555555"
+
+    def test_list_catalog_pagerduty_links_yaml_error(self, runner):
+        """Verify list-catalog-pagerduty-links behavior on YAML loading error."""
+        from pathlib import Path
+
+        with runner.isolated_filesystem():
+            # Write a malformed YAML file (unbalanced quotes/brackets/indentation)
+            bad_content = """
+apiVersion: datadoghq.com/v1alpha1
+kind: service
+metadata:
+  name: [unclosed bracket
+"""
+            Path("bad.datadog.yaml").write_text(bad_content)
+
+            result = runner.invoke(cli, ["list-catalog-pagerduty-links"])
+            assert result.exit_code == 1, result.output
+
+            output = json.loads(result.output)
+            assert output["ok"] is False
+            assert "errors" in output
+            assert len(output["errors"]) > 0
+            assert "bad.datadog.yaml" in output["errors"][0]["path"]
+            assert "YAML parsing error" in output["errors"][0]["message"]
+

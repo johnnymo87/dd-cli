@@ -1067,6 +1067,162 @@ def validate_catalog_cmd(paths: tuple[str, ...], output_format: str) -> None:
         sys.exit(1)
 
 
+def _catalog_pagerduty_link(
+    entry: dict[str, Any], path: Path, doc_idx: int
+) -> dict[str, Any] | None:
+    """Extract PagerDuty link from a valid local v3 entity dictionary.
+
+    Returns a dictionary of PagerDuty link details, or None if the entry
+    is not a valid v3 entity with integrations.pagerduty.serviceURL.
+    """
+    if not isinstance(entry, dict):
+        return None
+
+    schema_version = str(entry.get("schema-version") or "")
+    api_version = str(entry.get("apiVersion") or "")
+    is_v3 = schema_version.startswith("v3") or api_version.startswith("v3")
+
+    if not is_v3:
+        return None
+
+    integrations = entry.get("integrations")
+    if not isinstance(integrations, dict):
+        return None
+
+    pagerduty = integrations.get("pagerduty")
+    if not isinstance(pagerduty, dict):
+        return None
+
+    service_url = pagerduty.get("serviceURL")
+    if not isinstance(service_url, str):
+        return None
+
+    # Check for invalid fields under pagerduty
+    for invalid_field in ["service-name", "serviceName", "service-url"]:
+        if invalid_field in pagerduty:
+            return None
+
+    kind = entry.get("kind")
+    if not isinstance(kind, str):
+        return None
+
+    metadata = entry.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+
+    name = metadata.get("name")
+    if not isinstance(name, str):
+        return None
+
+    ref = f"{kind}:{name}"
+
+    owner = None
+    dd_team = entry.get("dd-team")
+    if isinstance(dd_team, dict):
+        owner = dd_team.get("team-handle")
+    if not owner:
+        owner = metadata.get("owner")
+    if not owner:
+        owner = entry.get("owner")
+
+    raw_tags = metadata.get("tags") or entry.get("tags") or []
+    tags = []
+    if isinstance(raw_tags, list):
+        for t in raw_tags:
+            if isinstance(t, str):
+                tags.append(t)
+
+    return {
+        "kind": kind,
+        "name": name,
+        "ref": ref,
+        "owner": owner,
+        "tags": tags,
+        "path": str(path),
+        "document": doc_idx,
+        "serviceURL": service_url,
+        "service_url": service_url,
+    }
+
+
+@cli.command("list-catalog-pagerduty-links")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="json",
+    show_default=True,
+)
+def list_catalog_pagerduty_links_cmd(paths: tuple[str, ...], output_format: str) -> None:
+    """List PagerDuty links declared in local Datadog entity YAML."""
+    import sys
+    import yaml  # type: ignore[import-untyped]
+
+    discovered_files = discover_catalog_files(paths)
+    all_errors = []
+    all_links = []
+
+    for path in discovered_files:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                documents = list(yaml.safe_load_all(f))
+        except Exception as e:
+            all_errors.append(
+                {
+                    "path": str(path),
+                    "document": 1,
+                    "field": "yaml",
+                    "message": f"YAML parsing error: {e}",
+                }
+            )
+
+    if all_errors:
+        output = {
+            "ok": False,
+            "errors": all_errors,
+        }
+        click.echo(json.dumps(output, indent=2))
+        sys.exit(1)
+
+    for path in discovered_files:
+        with path.open("r", encoding="utf-8") as f:
+            documents = list(yaml.safe_load_all(f))
+
+        for idx, doc in enumerate(documents, start=1):
+            if not doc or not isinstance(doc, dict):
+                continue
+
+            link = _catalog_pagerduty_link(doc, path, idx)
+            if link:
+                all_links.append(link)
+
+    if output_format == "json":
+        output_data = {
+            "count": len(all_links),
+            "data": all_links,
+        }
+        click.echo(json.dumps(output_data, indent=2))
+    elif output_format == "jsonl":
+        for link in all_links:
+            click.echo(json.dumps(link))
+    elif output_format == "summary":
+        summary_links = []
+        for l in all_links:
+            summary_links.append(
+                {
+                    "ref": l["ref"],
+                    "owner": l["owner"],
+                    "serviceURL": l["serviceURL"],
+                }
+            )
+        output_data = {
+            "count": len(summary_links),
+            "data": summary_links,
+        }
+        click.echo(json.dumps(output_data, indent=2))
+
+
 @cli.command("list-teams")
 @click.option(
     "--query",

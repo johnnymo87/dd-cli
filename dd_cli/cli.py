@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import click
@@ -919,6 +920,151 @@ def _catalog_entity_summary(entity: dict[str, Any]) -> dict[str, Any]:
         "tags": attrs.get("tags", []),
         "ingestion_source": meta.get("ingestionSource"),
     }
+
+
+def discover_catalog_files(
+    paths: list[str] | tuple[str, ...] | None = None,
+) -> list[Path]:
+    if not paths:
+        paths = ["."]
+
+    discovered = set()
+    for p in paths:
+        path_obj = Path(p)
+        if path_obj.is_file():
+            discovered.add(path_obj)
+        elif path_obj.is_dir():
+            for ext in ["*.datadog.yaml", "*.datadog.yml"]:
+                for found in path_obj.rglob(ext):
+                    if found.is_file():
+                        discovered.add(found)
+    return sorted(discovered, key=lambda x: str(x))
+
+
+def validate_catalog_file(path: Path) -> list[dict[str, Any]]:
+    import yaml
+
+    errors = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            documents = list(yaml.safe_load_all(f))
+    except Exception as e:
+        errors.append(
+            {
+                "path": str(path),
+                "document": 0,
+                "field": "yaml",
+                "message": f"YAML parsing error: {e}",
+            }
+        )
+        return errors
+
+    for idx, doc in enumerate(documents):
+        if not doc:
+            continue
+        if not isinstance(doc, dict):
+            continue
+
+        schema_version = str(doc.get("schema-version") or "")
+        api_version = str(doc.get("apiVersion") or "")
+
+        is_v3 = schema_version.startswith("v3") or api_version.startswith("v3")
+
+        if is_v3:
+            integrations = doc.get("integrations")
+            if isinstance(integrations, dict):
+                if "pagerduty" in integrations:
+                    pagerduty = integrations["pagerduty"]
+                    if not isinstance(pagerduty, dict):
+                        errors.append(
+                            {
+                                "path": str(path),
+                                "document": idx,
+                                "field": "integrations.pagerduty",
+                                "message": "integrations.pagerduty must be an object",
+                            }
+                        )
+                    else:
+                        if "serviceURL" not in pagerduty:
+                            errors.append(
+                                {
+                                    "path": str(path),
+                                    "document": idx,
+                                    "field": "integrations.pagerduty.serviceURL",
+                                    "message": (
+                                        "integrations.pagerduty.serviceURL "
+                                        "is required for v3"
+                                    ),
+                                }
+                            )
+
+                        for invalid_field in [
+                            "service-name",
+                            "serviceName",
+                            "service-url",
+                        ]:
+                            if invalid_field in pagerduty:
+                                errors.append(
+                                    {
+                                        "path": str(path),
+                                        "document": idx,
+                                        "field": (
+                                            f"integrations.pagerduty.{invalid_field}"
+                                        ),
+                                        "message": (
+                                            f"Field '{invalid_field}' is invalid "
+                                            "under integrations.pagerduty in v3"
+                                        ),
+                                    }
+                                )
+    return errors
+
+
+@cli.command("validate-catalog")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "summary"]),
+    default="json",
+    show_default=True,
+)
+def validate_catalog_cmd(paths: tuple[str, ...], output_format: str) -> None:
+    """Validate local Datadog Software Catalog YAML files."""
+    import sys
+
+    discovered_files = discover_catalog_files(paths)
+    all_errors = []
+    for path in discovered_files:
+        all_errors.extend(validate_catalog_file(path))
+
+    ok = len(all_errors) == 0
+    count = len(discovered_files)
+
+    if output_format == "json":
+        output = {
+            "ok": ok,
+            "count": count,
+            "errors": all_errors,
+        }
+        click.echo(json.dumps(output, indent=2))
+    else:  # summary
+        if ok:
+            click.echo(f"OK: Validated {count} file(s).")
+        else:
+            click.echo(f"FAIL: Found {len(all_errors)} error(s) in {count} file(s).")
+            sorted_errors = sorted(
+                all_errors,
+                key=lambda e: (e["path"], e["document"], e["field"]),
+            )
+            for err in sorted_errors:
+                click.echo(
+                    f"  - {err['path']}[doc {err['document']}] "
+                    f"{err['field']}: {err['message']}"
+                )
+
+    if not ok:
+        sys.exit(1)
 
 
 @cli.command("list-teams")

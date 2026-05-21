@@ -1155,3 +1155,66 @@ class TestTeamsClient:
             )
         finally:
             dd.close()
+
+
+class TestCatalogYamlHelpers:
+    """Tests for local catalog YAML validation and validate-catalog command."""
+
+    def test_validate_catalog_accepts_v3_pagerduty_service_url(self, runner):
+        """Verify that validate-catalog accepts v3 PagerDuty
+        integrations.pagerduty.serviceURL.
+        """
+        from pathlib import Path
+
+        with runner.isolated_filesystem():
+            content = """
+apiVersion: datadoghq.com/v1alpha1
+kind: service
+metadata:
+  name: my-service
+schema-version: v3
+integrations:
+  pagerduty:
+    serviceURL: https://example.pagerduty.com/services/P123456
+"""
+            Path("service.datadog.yaml").write_text(content.strip())
+
+            result = runner.invoke(cli, ["validate-catalog", "service.datadog.yaml"])
+            assert result.exit_code == 0, result.output
+
+            # Check JSON output format which is default
+            output = json.loads(result.output)
+            assert output["ok"] is True
+            assert output["count"] == 1
+            assert len(output["errors"]) == 0
+
+    def test_validate_catalog_rejects_v3_pagerduty_invalid_fields(self, runner):
+        """Verify that validate-catalog rejects v3 PagerDuty service-name."""
+        from pathlib import Path
+
+        with runner.isolated_filesystem():
+            content = """
+apiVersion: datadoghq.com/v1alpha1
+kind: service
+metadata:
+  name: my-service
+schema-version: v3
+integrations:
+  pagerduty:
+    serviceURL: https://example.pagerduty.com/services/P123456
+    service-name: my-pd-service
+"""
+            Path("service.datadog.yaml").write_text(content.strip())
+
+            result = runner.invoke(cli, ["validate-catalog", "service.datadog.yaml"])
+            assert result.exit_code == 1, result.output
+
+            output = json.loads(result.output)
+            assert output["ok"] is False
+            assert output["count"] == 1
+            assert len(output["errors"]) == 1
+
+            err = output["errors"][0]
+            assert err["path"] == "service.datadog.yaml"
+            assert err["field"] == "integrations.pagerduty.service-name"
+            assert "service-name" in err["message"]

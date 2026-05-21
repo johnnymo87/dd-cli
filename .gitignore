@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.worktrees/
 
 
 # direnv
@@ -15,4 +16,3 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
-

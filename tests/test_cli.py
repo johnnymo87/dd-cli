@@ -747,6 +747,61 @@ class TestFindUserTeams:
             assert output["data"][0]["handle"] == "example-team"
 
 
+class TestListTeamNotificationRules:
+    """Tests for list-team-notification-rules command."""
+
+    def test_list_team_notification_rules_resolves_handle(self, runner, mock_env):
+        team = {
+            "id": "team-123",
+            "type": "team",
+            "attributes": {"name": "Supply Chain", "handle": "supply-chain"},
+        }
+        rules = {
+            "data": [
+                {
+                    "id": "rule-1",
+                    "type": "team_notification_rules",
+                    "attributes": {
+                        "pagerduty": {"service_name": "datadog-routing-hub"},
+                        "email": {"enabled": False},
+                    },
+                }
+            ]
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [team]}
+            mock_client.list_team_notification_rules.return_value = rules
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["list-team-notification-rules", "supply-chain"]
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_teams.assert_called_once_with(
+                keyword="supply-chain",
+                me=False,
+                include=None,
+                fields=["handle", "name"],
+                page_number=0,
+                page_size=100,
+                sort=None,
+            )
+            mock_client.list_team_notification_rules.assert_called_once_with(
+                "team-123"
+            )
+            output = json.loads(result.output)
+            assert output["count"] == 1
+            assert output["data"][0]["id"] == "rule-1"
+            assert (
+                output["data"][0]["pagerduty_service_name"]
+                == "datadog-routing-hub"
+            )
+
+
 class TestGetEtIssue:
     """Tests for get-et-issue command."""
 
@@ -1116,6 +1171,23 @@ class TestTeamsClient:
                     "filter[keyword]": "Jane User",
                     "sort": "email",
                 },
+            )
+        finally:
+            dd.close()
+
+    def test_list_team_notification_rules(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"data": []})
+
+            result = dd.list_team_notification_rules("team-123")
+
+            assert result == {"data": []}
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v2/team/team-123/notification-rules",
             )
         finally:
             dd.close()

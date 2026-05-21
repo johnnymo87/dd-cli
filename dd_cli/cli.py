@@ -1340,6 +1340,80 @@ def find_user_teams_cmd(
     _output_teams(teams, output_format)
 
 
+@cli.command("list-team-notification-rules")
+@click.argument("handle", metavar="HANDLE")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+)
+@click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True)
+def list_team_notification_rules_cmd(
+    handle: str,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """List Datadog team notification routing rules."""
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            team = _resolve_team_by_handle(dd, handle)
+            data = dd.list_team_notification_rules(team["id"])
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    rules = data.get("data", [])
+    if output_format == "json":
+        click.echo(json.dumps(data, indent=2))
+    elif output_format == "jsonl":
+        for rule in rules:
+            click.echo(json.dumps(rule))
+    else:
+        summaries = [_team_notification_rule_summary(rule) for rule in rules]
+        click.echo(json.dumps({"count": len(summaries), "data": summaries}, indent=2))
+
+
+def _resolve_team_by_handle(dd: DatadogClient, handle: str) -> dict[str, Any]:
+    page = dd.list_teams(
+        keyword=handle,
+        me=False,
+        include=None,
+        fields=["handle", "name"],
+        page_number=0,
+        page_size=100,
+        sort=None,
+    )
+    matches = [
+        team
+        for team in page.get("data", [])
+        if (team.get("attributes") or {}).get("handle") == handle
+    ]
+    if not matches:
+        raise click.ClickException(f"No Datadog team found with handle {handle}")
+    if len(matches) > 1:
+        raise click.ClickException(f"Multiple Datadog teams matched handle {handle}")
+    return matches[0]
+
+
+def _team_notification_rule_summary(rule: dict[str, Any]) -> dict[str, Any]:
+    attrs = rule.get("attributes") or {}
+    pagerduty = attrs.get("pagerduty") or {}
+    return {
+        "id": rule.get("id"),
+        "pagerduty_service_name": (
+            pagerduty.get("service_name") if isinstance(pagerduty, dict) else None
+        ),
+        "email": attrs.get("email"),
+        "slack": attrs.get("slack"),
+        "ms_teams": attrs.get("ms_teams"),
+    }
+
+
 def _fetch_teams(
     dd: DatadogClient,
     *,

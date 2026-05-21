@@ -285,6 +285,10 @@ class DatadogClient:
             params=params,
         )
 
+    def list_team_notification_rules(self, team_id: str) -> dict[str, Any]:
+        """List notification rules for one Datadog Team."""
+        return self._request("GET", f"/api/v2/team/{team_id}/notification-rules")
+
     # ── Log-based metrics (v2) ──────────────────────────────────────
 
     def create_log_metric(
@@ -594,4 +598,3 @@ class DatadogClient:
             "GET",
             f"/api/v1/integration/pagerduty/configuration/services/{escaped_name}",
         )
-

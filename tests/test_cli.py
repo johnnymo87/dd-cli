@@ -801,6 +801,44 @@ class TestListTeamNotificationRules:
                 == "datadog-routing-hub"
             )
 
+    def test_list_team_notification_rules_paginates_team_lookup(
+        self, runner, mock_env
+    ):
+        first_page = {
+            "data": [
+                {
+                    "id": f"team-{i}",
+                    "type": "team",
+                    "attributes": {"handle": f"platform-{i}"},
+                }
+                for i in range(100)
+            ]
+        }
+        second_page = {
+            "data": [
+                {
+                    "id": "team-123",
+                    "type": "team",
+                    "attributes": {"handle": "platform"},
+                }
+            ]
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.side_effect = [first_page, second_page]
+            mock_client.list_team_notification_rules.return_value = {"data": []}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-team-notification-rules", "platform"])
+
+            assert result.exit_code == 0, result.output
+            assert mock_client.list_teams.call_count == 2
+            mock_client.list_team_notification_rules.assert_called_once_with(
+                "team-123"
+            )
+
 
 class TestGetEtIssue:
     """Tests for get-et-issue command."""

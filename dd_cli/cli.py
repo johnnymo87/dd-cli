@@ -1379,18 +1379,18 @@ def list_team_notification_rules_cmd(
 
 
 def _resolve_team_by_handle(dd: DatadogClient, handle: str) -> dict[str, Any]:
-    page = dd.list_teams(
+    teams = _fetch_teams(
+        dd,
         keyword=handle,
         me=False,
         include=None,
         fields=["handle", "name"],
-        page_number=0,
-        page_size=100,
         sort=None,
+        max_results=1000,
     )
     matches = [
         team
-        for team in page.get("data", [])
+        for team in teams
         if (team.get("attributes") or {}).get("handle") == handle
     ]
     if not matches:

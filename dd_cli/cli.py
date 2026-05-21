@@ -887,6 +887,70 @@ def get_catalog_entity_cmd(
         click.echo(json.dumps(output, indent=2))
 
 
+@cli.command("get-catalog-oncall")
+@click.argument("ref", metavar="REF")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json"]),
+    default="summary",
+    show_default=True,
+)
+@click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True)
+def get_catalog_oncall_cmd(
+    ref: str,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Get Datadog's on-call relationship for one Software Catalog entity."""
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            page = dd.list_catalog_entities(
+                kind=None,
+                owner=None,
+                name=None,
+                ref=ref,
+                include=["oncall"],
+                include_discovered=False,
+                offset=0,
+                limit=2,
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    entities = page.get("data", [])
+    if not entities:
+        raise click.ClickException(f"No catalog entity found for {ref}")
+    if len(entities) > 1:
+        raise click.ClickException(
+            f"Multiple catalog entities matched {ref}; use an entity ref"
+        )
+
+    entity = entities[0]
+    included = page.get("included", [])
+    if output_format == "json":
+        click.echo(json.dumps({"data": entity, "included": included}, indent=2))
+        return
+
+    oncall = ((entity.get("relationships") or {}).get("oncall") or {}).get(
+        "data", []
+    )
+    click.echo(
+        json.dumps(
+            {
+                "entity": _catalog_entity_summary(entity),
+                "oncall": oncall,
+                "included": included,
+            },
+            indent=2,
+        )
+    )
+
+
 def _output_catalog_entities(
     entities: list[dict[str, Any]],
     included: list[dict[str, Any]],

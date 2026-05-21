@@ -578,6 +578,62 @@ class TestGetCatalogEntity:
             assert "Multiple catalog entities matched example-service" in result.output
 
 
+class TestGetCatalogOncall:
+    """Tests for get-catalog-oncall command."""
+
+    def test_get_catalog_oncall_uses_include_oncall(self, runner, mock_env):
+        entity = {
+            "id": "entity-1",
+            "type": "entity",
+            "attributes": {
+                "ref": "service:auth-service",
+                "kind": "service",
+                "name": "auth-service",
+            },
+            "relationships": {
+                "oncall": {"data": [{"id": "oncall-1", "type": "oncalls"}]}
+            },
+        }
+        included = [
+            {
+                "id": "oncall-1",
+                "type": "oncalls",
+                "attributes": {
+                    "provider": "PagerDuty",
+                    "name": "Jane User",
+                    "email": "jane@example.com",
+                },
+            }
+        ]
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_catalog_entities.return_value = {
+                "data": [entity],
+                "included": included,
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["get-catalog-oncall", "service:auth-service"])
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_catalog_entities.assert_called_once_with(
+                kind=None,
+                owner=None,
+                name=None,
+                ref="service:auth-service",
+                include=["oncall"],
+                include_discovered=False,
+                offset=0,
+                limit=2,
+            )
+            output = json.loads(result.output)
+            assert output["entity"]["ref"] == "service:auth-service"
+            assert output["oncall"][0]["id"] == "oncall-1"
+            assert output["included"][0]["attributes"]["provider"] == "PagerDuty"
+
+
 class TestListTeams:
     """Tests for list-teams command."""
 

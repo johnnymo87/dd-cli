@@ -1456,7 +1456,9 @@ class TestCheckPagerDutyServiceCli:
     """Tests for check-pagerduty-service CLI command."""
 
     def test_check_pagerduty_service_success(self, runner, mock_env):
-        """Verify command calls get_pagerduty_integration_service with correct service name."""
+        """Verify command calls get_pagerduty_integration_service
+        with correct service name.
+        """
         service_response = {
             "service_name": "datadog-routing-hub",
             "service_key": "abcd1234abcd1234abcd1234abcd1234",
@@ -1465,7 +1467,9 @@ class TestCheckPagerDutyServiceCli:
             mock_client = MagicMock()
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.get_pagerduty_integration_service.return_value = service_response
+            mock_client.get_pagerduty_integration_service.return_value = (
+                service_response
+            )
             mock_client_class.return_value = mock_client
 
             result = runner.invoke(
@@ -1478,4 +1482,4 @@ class TestCheckPagerDutyServiceCli:
             )
             output = json.loads(result.output)
             assert output["service_name"] == "datadog-routing-hub"
-            assert output["service_key"] == "abcd1234abcd1234abcd1234abcd1234"
+            assert "service_key" not in output

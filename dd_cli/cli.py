@@ -1960,7 +1960,12 @@ def check_pagerduty_service_cmd(
     except RuntimeError as e:
         raise click.ClickException(str(e)) from None
 
-    click.echo(json.dumps(data, indent=2))
+    output_data = data
+    if isinstance(data, dict):
+        output_data = data.copy()
+        output_data.pop("service_key", None)
+
+    click.echo(json.dumps(output_data, indent=2))
 
 
 def main() -> None:

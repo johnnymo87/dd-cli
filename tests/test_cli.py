@@ -846,20 +846,13 @@ class TestListTeamNotificationRules:
                 page_size=100,
                 sort=None,
             )
-            mock_client.list_team_notification_rules.assert_called_once_with(
-                "team-123"
-            )
+            mock_client.list_team_notification_rules.assert_called_once_with("team-123")
             output = json.loads(result.output)
             assert output["count"] == 1
             assert output["data"][0]["id"] == "rule-1"
-            assert (
-                output["data"][0]["pagerduty_service_name"]
-                == "datadog-routing-hub"
-            )
+            assert output["data"][0]["pagerduty_service_name"] == "datadog-routing-hub"
 
-    def test_list_team_notification_rules_paginates_team_lookup(
-        self, runner, mock_env
-    ):
+    def test_list_team_notification_rules_paginates_team_lookup(self, runner, mock_env):
         first_page = {
             "data": [
                 {
@@ -891,9 +884,7 @@ class TestListTeamNotificationRules:
 
             assert result.exit_code == 0, result.output
             assert mock_client.list_teams.call_count == 2
-            mock_client.list_team_notification_rules.assert_called_once_with(
-                "team-123"
-            )
+            mock_client.list_team_notification_rules.assert_called_once_with("team-123")
 
 
 class TestGetEtIssue:
@@ -1384,6 +1375,7 @@ integrations:
             assert err["path"] == "service.datadog.yaml"
             assert err["field"] == "integrations.pagerduty.service-name"
             assert "service-name" in err["message"]
+
 
 class TestListCatalogPagerdutyLinks:
     """Tests for list-catalog-pagerduty-links command."""

@@ -936,9 +936,7 @@ def get_catalog_oncall_cmd(
         click.echo(json.dumps({"data": entity, "included": included}, indent=2))
         return
 
-    oncall = ((entity.get("relationships") or {}).get("oncall") or {}).get(
-        "data", []
-    )
+    oncall = ((entity.get("relationships") or {}).get("oncall") or {}).get("data", [])
     click.echo(
         json.dumps(
             {
@@ -1453,9 +1451,7 @@ def _resolve_team_by_handle(dd: DatadogClient, handle: str) -> dict[str, Any]:
         max_results=1000,
     )
     matches = [
-        team
-        for team in teams
-        if (team.get("attributes") or {}).get("handle") == handle
+        team for team in teams if (team.get("attributes") or {}).get("handle") == handle
     ]
     if not matches:
         raise click.ClickException(f"No Datadog team found with handle {handle}")

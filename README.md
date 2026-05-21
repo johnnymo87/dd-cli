@@ -31,6 +31,11 @@ dd-cli get-catalog-entity service:example-service --include raw_schema
 # Search Datadog Teams and find a user's teams
 dd-cli list-teams --query platform
 dd-cli find-user-teams user@example.com
+
+# Validate and inspect PagerDuty metadata for Software Catalog entities
+dd-cli validate-catalog .
+dd-cli list-catalog-pagerduty-links .
+dd-cli get-catalog-oncall service:example-service
 ```
 
 ## Documentation

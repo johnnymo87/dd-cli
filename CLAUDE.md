@@ -62,14 +62,19 @@ dd-cli get-incident 152 --enrich
 | `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
 | `dd-cli list-teams` | List/search Datadog Teams by name, handle, or member email |
 | `dd-cli find-user-teams MEMBER` | Find Datadog Teams matching a user/member email or name |
+| `dd-cli list-team-notification-rules HANDLE` | List team notification routing rules, including PagerDuty handles |
 | `dd-cli list-slos` | List SLOs with optional tag filtering |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
 | `dd-cli get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
 | `dd-cli search-et-issues QUERY` | Search error tracking issues by service/error type |
 | `dd-cli get-et-issue ID` | Get a single error tracking issue with details |
 | `dd-cli update-et-issue-state ID STATE` | Update issue state (OPEN, RESOLVED, IGNORED) |
+| `dd-cli validate-catalog` | Validate local Software Catalog PagerDuty metadata |
+| `dd-cli list-catalog-pagerduty-links` | List local Catalog PagerDuty service URLs |
 | `dd-cli list-catalog-entities` | List Software Catalog entities with optional filters |
 | `dd-cli get-catalog-entity REF` | Get one Software Catalog entity by ref or name |
+| `dd-cli get-catalog-oncall REF` | Read Datadog's on-call relationship for one Catalog entity |
+| `dd-cli check-pagerduty-service SERVICE_NAME` | Check a known Datadog PagerDuty integration service handle |
 
 Software Catalog commands are read-only. Source-of-truth changes should happen through repository-backed `entity.datadog.yaml` PRs, not through Datadog write APIs.
 
@@ -79,6 +84,11 @@ Teams commands are read-only. Examples:
 dd-cli list-teams --query platform
 dd-cli find-user-teams user@example.com
 ```
+
+PagerDuty helpers are Datadog-only and read-only. `validate-catalog` expects
+Software Catalog v3 PagerDuty links to use `integrations.pagerduty.serviceURL`.
+Authoritative PagerDuty schedules and current PagerDuty responders require
+PagerDuty API credentials, so `dd-cli` does not expose them yet.
 
 ### search-logs Options
 

@@ -1930,6 +1930,39 @@ def update_et_issue_state_cmd(
     click.echo(json.dumps(data, indent=2))
 
 
+@cli.command("check-pagerduty-service")
+@click.argument("service_name", metavar="SERVICE_NAME")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def check_pagerduty_service_cmd(
+    service_name: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Check a PagerDuty integration service config by name."""
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.get_pagerduty_integration_service(service_name)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
 def main() -> None:
     cli()
 

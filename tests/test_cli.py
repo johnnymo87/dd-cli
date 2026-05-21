@@ -1219,7 +1219,6 @@ integrations:
             assert err["field"] == "integrations.pagerduty.service-name"
             assert "service-name" in err["message"]
 
-
 class TestListCatalogPagerdutyLinks:
     """Tests for list-catalog-pagerduty-links command."""
 
@@ -1405,3 +1404,78 @@ metadata:
             assert len(output["errors"]) > 0
             assert "bad.datadog.yaml" in output["errors"][0]["path"]
             assert "YAML parsing error" in output["errors"][0]["message"]
+
+
+class TestPagerDutyClient:
+    """Tests for DatadogClient PagerDuty integration methods."""
+
+    def test_get_pagerduty_integration_service(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            expected_response = {
+                "service_name": "datadog-routing-hub",
+                "service_key": "abcd1234abcd1234abcd1234abcd1234",
+            }
+            dd._request = MagicMock(return_value=expected_response)
+
+            result = dd.get_pagerduty_integration_service("datadog-routing-hub")
+
+            assert result == expected_response
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v1/integration/pagerduty/configuration/services/datadog-routing-hub",
+            )
+        finally:
+            dd.close()
+
+    def test_get_pagerduty_integration_service_escapes_spaces(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            expected_response = {
+                "service_name": "datadog routing hub",
+                "service_key": "abcd1234abcd1234abcd1234abcd1234",
+            }
+            dd._request = MagicMock(return_value=expected_response)
+
+            result = dd.get_pagerduty_integration_service("datadog routing hub")
+
+            assert result == expected_response
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v1/integration/pagerduty/configuration/services/datadog%20routing%20hub",
+            )
+        finally:
+            dd.close()
+
+
+class TestCheckPagerDutyServiceCli:
+    """Tests for check-pagerduty-service CLI command."""
+
+    def test_check_pagerduty_service_success(self, runner, mock_env):
+        """Verify command calls get_pagerduty_integration_service with correct service name."""
+        service_response = {
+            "service_name": "datadog-routing-hub",
+            "service_key": "abcd1234abcd1234abcd1234abcd1234",
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_pagerduty_integration_service.return_value = service_response
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["check-pagerduty-service", "datadog-routing-hub"]
+            )
+
+            assert result.exit_code == 0
+            mock_client.get_pagerduty_integration_service.assert_called_once_with(
+                "datadog-routing-hub"
+            )
+            output = json.loads(result.output)
+            assert output["service_name"] == "datadog-routing-hub"
+            assert output["service_key"] == "abcd1234abcd1234abcd1234abcd1234"

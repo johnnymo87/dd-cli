@@ -584,3 +584,14 @@ class DatadogClient:
             "GET",
             f"/api/v2/workflows/{workflow_id}/instances/{instance_id}",
         )
+
+    # ── PagerDuty (v1) ──────────────────────────────────────────────
+
+    def get_pagerduty_integration_service(self, service_name: str) -> dict[str, Any]:
+        """Get PagerDuty integration service by name."""
+        escaped_name = urllib.parse.quote(service_name, safe="")
+        return self._request(
+            "GET",
+            f"/api/v1/integration/pagerduty/configuration/services/{escaped_name}",
+        )
+

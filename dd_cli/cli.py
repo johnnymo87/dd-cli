@@ -733,6 +733,284 @@ def _output_monitors(monitors: list[dict[str, Any]], output_format: str) -> None
             click.echo(json.dumps(m))
 
 
+@cli.command("create-dashboard")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--spec",
+    "spec_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Path to a JSON file containing the dashboard request body "
+        "(title, layout_type, widgets, template_variables, ...). "
+        "Convenience flags below override matching keys in the file."
+    ),
+)
+@click.option("--title", default=None, help="Dashboard title (overrides --spec).")
+@click.option(
+    "--description", default=None, help="Dashboard description (overrides --spec)."
+)
+@click.option(
+    "--layout-type",
+    type=click.Choice(["ordered", "free"]),
+    default=None,
+    help="Layout type. Defaults to 'ordered' when not set here or in --spec.",
+)
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Dashboard tag (repeatable, e.g., --tag team:fbm --tag managed-by:dd-cli).",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def create_dashboard_cmd(
+    site: str,
+    spec_path: Path | None,
+    title: str | None,
+    description: str | None,
+    layout_type: str | None,
+    tags: tuple[str, ...],
+    timeout: float,
+) -> None:
+    """Create a Datadog dashboard.
+
+    The bulk of the dashboard (widgets, layout, template variables) is
+    supplied via --spec, a JSON file holding the dashboard request body.
+    Convenience flags let you set or override the title, description,
+    layout type, and tags without editing the file.
+
+    \b
+    Example:
+        dd-cli create-dashboard \\
+            --spec dashboard.json \\
+            --title 'My service overview' \\
+            --tag team:my-team
+    """
+    body: dict[str, Any] = {}
+    if spec_path is not None:
+        try:
+            with spec_path.open("r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            raise click.UsageError(f"Failed to read --spec JSON: {e}") from None
+        if not isinstance(loaded, dict):
+            raise click.UsageError("--spec JSON must be an object (the request body).")
+        body = loaded
+
+    if title is not None:
+        body["title"] = title
+    if description is not None:
+        body["description"] = description
+    if layout_type is not None:
+        body["layout_type"] = layout_type
+    if tags:
+        body["tags"] = list(tags)
+
+    body.setdefault("layout_type", "ordered")
+    body.setdefault("widgets", [])
+
+    if not body.get("title"):
+        raise click.UsageError(
+            "A dashboard title is required. Pass --title or include it in --spec."
+        )
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.create_dashboard(body=body)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    dashboard_id = data.get("id")
+    click.echo(
+        json.dumps(
+            {
+                "id": dashboard_id,
+                "url": _dashboard_url(site, data),
+                "title": data.get("title"),
+            },
+            indent=2,
+        )
+    )
+
+
+def _dashboard_url(site: str, data: dict[str, Any]) -> str | None:
+    """Build a full dashboard URL from an API response.
+
+    Datadog returns a relative ``url`` (e.g. /dashboard/abc-def-ghi/title).
+    Fall back to constructing one from the id if ``url`` is absent.
+    """
+    from .http import _normalize_site
+
+    host = _normalize_site(site)
+    url = data.get("url")
+    if isinstance(url, str) and url:
+        return f"https://{host}{url}"
+    dashboard_id = data.get("id")
+    if dashboard_id:
+        return f"https://{host}/dashboard/{dashboard_id}"
+    return None
+
+
+def _parse_dashboard_ref(ref: str) -> str:
+    """Parse a dashboard URL or ID into a dashboard ID string.
+
+    Supports:
+        - Plain ID: 'abc-def-ghi'
+        - Full URL: 'https://us3.datadoghq.com/dashboard/abc-def-ghi/title-slug'
+    """
+    import urllib.parse
+
+    if ref.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(ref)
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 2 and path_parts[0] == "dashboard":
+            return path_parts[1]
+        raise click.UsageError(f"Cannot parse dashboard ID from URL: {ref}")
+
+    return ref
+
+
+@cli.command("get-dashboard")
+@click.argument("dashboard_id_or_url", metavar="DASHBOARD")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def get_dashboard_cmd(
+    dashboard_id_or_url: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Get a dashboard's full definition by ID or URL.
+
+    Accepts a dashboard ID or a full Datadog dashboard URL:
+
+    \b
+        dd-cli get-dashboard abc-def-ghi
+
+        dd-cli get-dashboard 'https://us3.datadoghq.com/dashboard/abc-def-ghi/title'
+    """
+    dashboard_id = _parse_dashboard_ref(dashboard_id_or_url)
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.get_dashboard(dashboard_id)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(json.dumps(data, indent=2))
+
+
+_DASHBOARD_SUMMARY_FIELDS = ("id", "title", "url", "layout_type", "author_handle")
+
+
+def _dashboard_summary(dashboard: dict[str, Any]) -> dict[str, Any]:
+    """Project a dashboard list entry down to the summary fields."""
+    return {field: dashboard.get(field) for field in _DASHBOARD_SUMMARY_FIELDS}
+
+
+@cli.command("list-dashboards")
+@click.option(
+    "--name",
+    default=None,
+    help="Filter by dashboard title (substring, case-insensitive, client-side).",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+    help=(
+        "Output format. summary: {id, title, url, layout_type, author_handle} "
+        "per dashboard. json: full list objects wrapped in {count, data}. "
+        "jsonl: one full dashboard per line, no wrapper."
+    ),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def list_dashboards_cmd(
+    name: str | None,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """List dashboards, optionally filtered by title substring.
+
+    \b
+    Examples:
+      dd-cli list-dashboards
+      dd-cli list-dashboards --name 'FBM canary'
+      dd-cli list-dashboards --format jsonl | jq '.id'
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.list_dashboards()
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    dashboards = data.get("dashboards", [])
+    if name:
+        needle = name.lower()
+        dashboards = [
+            d for d in dashboards if needle in str(d.get("title", "")).lower()
+        ]
+
+    _output_dashboards(dashboards, output_format)
+
+
+def _output_dashboards(dashboards: list[dict[str, Any]], output_format: str) -> None:
+    """Output dashboards in the specified format."""
+    if output_format == "summary":
+        summary = [_dashboard_summary(d) for d in dashboards]
+        click.echo(json.dumps({"count": len(summary), "data": summary}, indent=2))
+    elif output_format == "json":
+        click.echo(json.dumps({"count": len(dashboards), "data": dashboards}, indent=2))
+    elif output_format == "jsonl":
+        for d in dashboards:
+            click.echo(json.dumps(d))
+
+
 @cli.command("list-catalog-entities")
 @click.option("--kind", default=None, help="Filter by entity kind, e.g. service.")
 @click.option("--owner", default=None, help="Filter by owner/team handle.")

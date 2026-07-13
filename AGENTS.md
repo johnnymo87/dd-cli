@@ -40,6 +40,9 @@ dd-cli validate
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd-cli list-monitors` | List monitors, filtered by tag and/or name (auto-paginates) |
 | `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
+| `dd-cli create-dashboard` | Create a dashboard from a `--spec` JSON body (+ title/tags flags) |
+| `dd-cli get-dashboard ID_OR_URL` | Get a dashboard's full definition by ID or URL |
+| `dd-cli list-dashboards` | List dashboards, optionally filtered by title |
 | `dd-cli list-slos` | List SLOs with optional tag filtering |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
 | `dd-cli get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |

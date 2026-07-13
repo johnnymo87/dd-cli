@@ -442,6 +442,47 @@ class DatadogClient:
             "GET", f"/api/v1/monitor/{monitor_id}", params=params or None
         )
 
+    # ── Dashboards (v1) ─────────────────────────────────────────────
+
+    def create_dashboard(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        """Create a dashboard (POST /api/v1/dashboard).
+
+        The body is the full Datadog dashboard request object (title,
+        layout_type, widgets, template_variables, etc.). It is sent as-is
+        so callers can supply the exact widget/layout definition.
+        """
+        return self._request("POST", "/api/v1/dashboard", json_body=body)
+
+    def get_dashboard(self, dashboard_id: str) -> dict[str, Any]:
+        """Get a dashboard's full definition by ID."""
+        return self._request("GET", f"/api/v1/dashboard/{dashboard_id}")
+
+    def list_dashboards(
+        self,
+        *,
+        filter_shared: bool | None = None,
+        filter_deleted: bool | None = None,
+    ) -> dict[str, Any]:
+        """List all dashboards (GET /api/v1/dashboard).
+
+        Returns a wrapped object with a ``dashboards`` array. Each entry is a
+        summary (id, title, url, ...), not the full widget definition.
+
+        Args:
+            filter_shared: When set, filter by shared status.
+            filter_deleted: When set, include deleted dashboards.
+        """
+        params: dict[str, Any] = {}
+        if filter_shared is not None:
+            params["filter[shared]"] = filter_shared
+        if filter_deleted is not None:
+            params["filter[deleted]"] = filter_deleted
+        return self._request("GET", "/api/v1/dashboard", params=params or None)
+
+    def delete_dashboard(self, dashboard_id: str) -> dict[str, Any]:
+        """Delete a dashboard by ID."""
+        return self._request("DELETE", f"/api/v1/dashboard/{dashboard_id}")
+
     # ── Error Tracking (v2) ────────────────────────────────────────
 
     def search_error_tracking_issues(

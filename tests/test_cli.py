@@ -1641,3 +1641,306 @@ class TestCheckPagerDutyServiceCli:
             output = json.loads(result.output)
             assert output["service_name"] == "datadog-routing-hub"
             assert "service_key" not in output
+
+
+class TestCreateDashboard:
+    """Tests for create-dashboard command."""
+
+    def _spec_file(self, tmp_path, body):
+        spec = tmp_path / "dashboard.json"
+        spec.write_text(json.dumps(body), encoding="utf-8")
+        return str(spec)
+
+    def test_create_dashboard_from_spec(self, runner, mock_env, tmp_path):
+        """Verify --spec body is sent as-is and id/url are printed."""
+        spec_body = {
+            "title": "My dashboard",
+            "layout_type": "ordered",
+            "widgets": [{"definition": {"type": "note", "content": "hi"}}],
+        }
+        spec_path = self._spec_file(tmp_path, spec_body)
+        create_response = {
+            "id": "abc-def-ghi",
+            "title": "My dashboard",
+            "url": "/dashboard/abc-def-ghi/my-dashboard",
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.create_dashboard.return_value = create_response
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["create-dashboard", "--spec", spec_path])
+
+            assert result.exit_code == 0, result.output
+            mock_client.create_dashboard.assert_called_once_with(body=spec_body)
+            output = json.loads(result.output)
+            assert output["id"] == "abc-def-ghi"
+            assert output["url"] == (
+                "https://us3.datadoghq.com/dashboard/abc-def-ghi/my-dashboard"
+            )
+            assert output["title"] == "My dashboard"
+
+    def test_create_dashboard_flags_override_spec(self, runner, mock_env, tmp_path):
+        """Verify --title/--description/--layout-type/--tag override spec keys."""
+        spec_path = self._spec_file(
+            tmp_path, {"title": "old", "widgets": [], "layout_type": "free"}
+        )
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.create_dashboard.return_value = {"id": "xyz"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                [
+                    "create-dashboard",
+                    "--spec",
+                    spec_path,
+                    "--title",
+                    "new title",
+                    "--description",
+                    "desc",
+                    "--layout-type",
+                    "ordered",
+                    "--tag",
+                    "team:fbm",
+                    "--tag",
+                    "managed-by:dd-cli",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.create_dashboard.assert_called_once_with(
+                body={
+                    "title": "new title",
+                    "widgets": [],
+                    "layout_type": "ordered",
+                    "description": "desc",
+                    "tags": ["team:fbm", "managed-by:dd-cli"],
+                }
+            )
+
+    def test_create_dashboard_defaults_layout_and_widgets(self, runner, mock_env):
+        """Verify a bare --title creates a valid body with defaults."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.create_dashboard.return_value = {"id": "xyz"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["create-dashboard", "--title", "Just a title"])
+
+            assert result.exit_code == 0, result.output
+            mock_client.create_dashboard.assert_called_once_with(
+                body={
+                    "title": "Just a title",
+                    "layout_type": "ordered",
+                    "widgets": [],
+                }
+            )
+
+    def test_create_dashboard_requires_title(self, runner, mock_env, tmp_path):
+        """Verify a missing title (no flag, none in spec) is a usage error."""
+        spec_path = self._spec_file(tmp_path, {"widgets": []})
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["create-dashboard", "--spec", spec_path])
+
+            assert result.exit_code != 0
+            assert "title is required" in result.output
+            mock_client.create_dashboard.assert_not_called()
+
+    def test_create_dashboard_url_fallback_from_id(self, runner, mock_env):
+        """Verify the URL falls back to /dashboard/{id} when url is absent."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.create_dashboard.return_value = {"id": "no-url-id"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["create-dashboard", "--title", "t"])
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.output)
+            assert output["url"] == "https://us3.datadoghq.com/dashboard/no-url-id"
+
+
+class TestGetDashboard:
+    """Tests for get-dashboard command."""
+
+    def test_get_dashboard_by_id(self, runner, mock_env):
+        """Verify get-dashboard fetches a dashboard by ID."""
+        dashboard_response = {
+            "id": "abc-def-ghi",
+            "title": "My dashboard",
+            "widgets": [],
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_dashboard.return_value = dashboard_response
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["get-dashboard", "abc-def-ghi"])
+
+            assert result.exit_code == 0, result.output
+            mock_client.get_dashboard.assert_called_once_with("abc-def-ghi")
+            output = json.loads(result.output)
+            assert output["id"] == "abc-def-ghi"
+
+    def test_get_dashboard_from_url(self, runner, mock_env):
+        """Verify get-dashboard extracts the ID from a full Datadog URL."""
+        url = "https://us3.datadoghq.com/dashboard/abc-def-ghi/my-dashboard-slug"
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_dashboard.return_value = {"id": "abc-def-ghi"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["get-dashboard", url])
+
+            assert result.exit_code == 0, result.output
+            mock_client.get_dashboard.assert_called_once_with("abc-def-ghi")
+
+
+class TestListDashboards:
+    """Tests for list-dashboards command."""
+
+    def _full_dashboard(self, dashboard_id, title, **overrides):
+        d = {
+            "id": dashboard_id,
+            "title": title,
+            "url": f"/dashboard/{dashboard_id}/slug",
+            "layout_type": "ordered",
+            "author_handle": "dev@example.com",
+            "description": "desc",
+        }
+        d.update(overrides)
+        return d
+
+    def test_list_dashboards_default_summary_format(self, runner, mock_env):
+        """Default --format summary returns projected fields only."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_dashboards.return_value = {
+                "dashboards": [
+                    self._full_dashboard("id1", "One"),
+                    self._full_dashboard("id2", "Two"),
+                ]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-dashboards"])
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.output)
+            assert output["count"] == 2
+            assert output["data"][0] == {
+                "id": "id1",
+                "title": "One",
+                "url": "/dashboard/id1/slug",
+                "layout_type": "ordered",
+                "author_handle": "dev@example.com",
+            }
+
+    def test_list_dashboards_name_filter(self, runner, mock_env):
+        """Verify --name filters client-side by title substring."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_dashboards.return_value = {
+                "dashboards": [
+                    self._full_dashboard("id1", "FBM canary REJECTED"),
+                    self._full_dashboard("id2", "Unrelated dashboard"),
+                ]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-dashboards", "--name", "fbm canary"])
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.output)
+            assert output["count"] == 1
+            assert output["data"][0]["id"] == "id1"
+
+    def test_list_dashboards_format_jsonl(self, runner, mock_env):
+        """Verify --format jsonl emits one full dashboard per line."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_dashboards.return_value = {
+                "dashboards": [self._full_dashboard("id1", "One")]
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-dashboards", "--format", "jsonl"])
+
+            assert result.exit_code == 0, result.output
+            lines = [ln for ln in result.output.splitlines() if ln.strip()]
+            assert len(lines) == 1
+            assert json.loads(lines[0])["description"] == "desc"
+
+
+class TestDashboardClient:
+    """Tests for DatadogClient dashboard methods."""
+
+    def test_create_dashboard_posts_body(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            body = {"title": "t", "layout_type": "ordered", "widgets": []}
+            dd._request = MagicMock(return_value={"id": "abc"})
+
+            result = dd.create_dashboard(body=body)
+
+            assert result == {"id": "abc"}
+            dd._request.assert_called_once_with(
+                "POST", "/api/v1/dashboard", json_body=body
+            )
+        finally:
+            dd.close()
+
+    def test_get_dashboard(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"id": "abc"})
+
+            result = dd.get_dashboard("abc")
+
+            assert result == {"id": "abc"}
+            dd._request.assert_called_once_with("GET", "/api/v1/dashboard/abc")
+        finally:
+            dd.close()
+
+    def test_list_dashboards_defaults(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"dashboards": []})
+
+            result = dd.list_dashboards()
+
+            assert result == {"dashboards": []}
+            dd._request.assert_called_once_with("GET", "/api/v1/dashboard", params=None)
+        finally:
+            dd.close()

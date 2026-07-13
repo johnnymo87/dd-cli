@@ -14,13 +14,22 @@ def _default_site() -> str:
 
 
 def _get_client(site: str, timeout: float = 15.0) -> DatadogClient:
-    """Create a DatadogClient, raising UsageError if credentials are missing."""
+    """Create a DatadogClient, raising UsageError if credentials are missing.
+
+    Prefers a Personal Access Token (``DD_PAT``, sent as a Bearer token). Falls
+    back to the legacy ``DD_API_KEY`` + ``DD_APP_KEY`` pair.
+    """
+    pat = env("DD_PAT")
+    if pat:
+        return DatadogClient(site=site, pat=pat, timeout=timeout)
+
     api_key = env("DD_API_KEY")
     app_key = env("DD_APP_KEY")
 
     if not api_key or not app_key:
         raise click.UsageError(
-            "DD_API_KEY and DD_APP_KEY must be set. The v2 APIs require both."
+            "Set DD_PAT (a Datadog Personal Access Token, recommended) or both "
+            "DD_API_KEY and DD_APP_KEY."
         )
 
     return DatadogClient(site=site, api_key=api_key, app_key=app_key, timeout=timeout)
@@ -235,17 +244,12 @@ def _parse_custom_fields(field: tuple[str, ...]) -> dict[str, Any]:
     help="Datadog site, e.g., us3.datadoghq.com",
 )
 def validate_cmd(site: str) -> None:
-    """Validate DD_API_KEY against /api/v1/validate."""
-    api_key = env("DD_API_KEY")
-    if not api_key:
-        raise click.UsageError("DD_API_KEY must be set")
+    """Validate the active Datadog credential against /api/v1/validate.
 
-    # validate only needs API key, but we still use the client for consistency
-    # (app_key is required by client but validate endpoint doesn't check it)
-    app_key = env("DD_APP_KEY") or "unused"
-
+    Uses DD_PAT (Bearer) when set, otherwise the DD_API_KEY / DD_APP_KEY pair.
+    """
     try:
-        with DatadogClient(site=site, api_key=api_key, app_key=app_key) as dd:
+        with _get_client(site) as dd:
             data = dd.validate()
     except DatadogAPIError as e:
         _handle_api_error(e)

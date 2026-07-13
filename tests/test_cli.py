@@ -1944,3 +1944,85 @@ class TestDashboardClient:
             dd._request.assert_called_once_with("GET", "/api/v1/dashboard", params=None)
         finally:
             dd.close()
+
+
+class TestAuthHeaders:
+    """Tests for how credentials become HTTP auth headers."""
+
+    def test_pat_uses_bearer_authorization(self):
+        """A PAT authenticates via `Authorization: Bearer` and omits the
+        legacy DD-API-KEY / DD-APPLICATION-KEY headers."""
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_secret")
+        try:
+            headers = dd._client.headers
+            assert headers.get("authorization") == "Bearer ddpat_secret"
+            assert "dd-api-key" not in headers
+            assert "dd-application-key" not in headers
+        finally:
+            dd.close()
+
+    def test_api_app_keys_use_legacy_headers(self):
+        """The legacy app+api key path still sets both DD headers and no
+        Authorization header (backward compatibility)."""
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            headers = dd._client.headers
+            assert headers.get("dd-api-key") == "a"
+            assert headers.get("dd-application-key") == "b"
+            assert "authorization" not in headers
+        finally:
+            dd.close()
+
+    def test_missing_all_credentials_raises(self):
+        """Constructing a client with neither a PAT nor api+app keys is an
+        error (nothing to authenticate with)."""
+        from dd_cli.http import DatadogClient
+
+        with pytest.raises(ValueError):
+            DatadogClient(site="us3.datadoghq.com")
+
+
+class TestGetClientCredentialSelection:
+    """Tests for _get_client env-var precedence (DD_PAT over app+api)."""
+
+    def test_prefers_pat_when_set(self):
+        from dd_cli.cli import _get_client
+
+        with patch.dict(
+            "os.environ",
+            {"DD_PAT": "ddpat_x", "DD_API_KEY": "a" * 32, "DD_APP_KEY": "b" * 40},
+            clear=True,
+        ), patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            _get_client("us3.datadoghq.com")
+            mock_client_class.assert_called_once_with(
+                site="us3.datadoghq.com", pat="ddpat_x", timeout=15.0
+            )
+
+    def test_falls_back_to_app_api_keys(self):
+        from dd_cli.cli import _get_client
+
+        with patch.dict(
+            "os.environ",
+            {"DD_API_KEY": "a" * 32, "DD_APP_KEY": "b" * 40},
+            clear=True,
+        ), patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            _get_client("us3.datadoghq.com")
+            mock_client_class.assert_called_once_with(
+                site="us3.datadoghq.com",
+                api_key="a" * 32,
+                app_key="b" * 40,
+                timeout=15.0,
+            )
+
+    def test_errors_when_no_credentials(self):
+        import click
+
+        from dd_cli.cli import _get_client
+
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(click.UsageError):
+                _get_client("us3.datadoghq.com")

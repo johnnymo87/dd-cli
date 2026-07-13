@@ -58,19 +58,42 @@ class DatadogClient:
         self,
         *,
         site: str,
-        api_key: str,
-        app_key: str,
+        api_key: str | None = None,
+        app_key: str | None = None,
+        pat: str | None = None,
         timeout: float = 15.0,
     ) -> None:
+        """Create a Datadog HTTP client.
+
+        Authentication is either:
+
+        - A Personal Access Token (``pat``), sent as ``Authorization: Bearer``.
+          This is the recommended, single-credential method and does not need
+          an API key.
+        - The legacy app+api key pair (``api_key`` + ``app_key``), sent as the
+          ``DD-API-KEY`` / ``DD-APPLICATION-KEY`` headers.
+
+        A PAT takes precedence when supplied.
+        """
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if pat:
+            headers["Authorization"] = f"Bearer {pat}"
+        elif api_key and app_key:
+            headers["DD-API-KEY"] = api_key
+            headers["DD-APPLICATION-KEY"] = app_key
+        else:
+            raise ValueError(
+                "DatadogClient requires either a PAT (pat=...) or both "
+                "api_key and app_key."
+            )
+
         self._client = httpx.Client(
             base_url=_api_host(site),
             timeout=timeout,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "DD-API-KEY": api_key,
-                "DD-APPLICATION-KEY": app_key,
-            },
+            headers=headers,
         )
 
     def close(self) -> None:

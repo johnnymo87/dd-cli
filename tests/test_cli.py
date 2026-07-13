@@ -1985,6 +1985,31 @@ class TestAuthHeaders:
         with pytest.raises(ValueError):
             DatadogClient(site="us3.datadoghq.com")
 
+    def test_validate_uses_current_user_for_pat(self):
+        """With a PAT, validate() hits /api/v2/current_user (the API-key-only
+        /api/v1/validate rejects a PAT with 403)."""
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
+        try:
+            dd._request = MagicMock(return_value={"data": {}})
+            dd.validate()
+            dd._request.assert_called_once_with("GET", "/api/v2/current_user")
+        finally:
+            dd.close()
+
+    def test_validate_uses_v1_validate_for_api_key(self):
+        """With an API key, validate() hits the legacy /api/v1/validate."""
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        try:
+            dd._request = MagicMock(return_value={"valid": True})
+            dd.validate()
+            dd._request.assert_called_once_with("GET", "/api/v1/validate")
+        finally:
+            dd.close()
+
 
 class TestGetClientCredentialSelection:
     """Tests for _get_client env-var precedence (DD_PAT over app+api)."""

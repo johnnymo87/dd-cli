@@ -79,6 +79,7 @@ class DatadogClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+        self._uses_pat = bool(pat)
         if pat:
             headers["Authorization"] = f"Bearer {pat}"
         elif api_key and app_key:
@@ -217,7 +218,15 @@ class DatadogClient:
         return self._request("POST", "/api/v2/logs/events/search", json_body=body)
 
     def validate(self) -> dict[str, Any]:
-        """Validate API key. Note: only requires API key, not app key."""
+        """Validate the active credential.
+
+        The ``/api/v1/validate`` endpoint only validates an API key, so it
+        rejects a PAT (Bearer) with 403. When authenticating with a PAT, hit
+        ``/api/v2/current_user`` instead — a minimal authenticated read that
+        confirms the token works.
+        """
+        if self._uses_pat:
+            return self._request("GET", "/api/v2/current_user")
         return self._request("GET", "/api/v1/validate")
 
     def list_catalog_entities(

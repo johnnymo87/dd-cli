@@ -21,8 +21,7 @@ def mock_env():
         "os.environ",
         {
             "DD_SITE": "us3.datadoghq.com",
-            "DD_API_KEY": "a" * 32,
-            "DD_APP_KEY": "b" * 40,
+            "DD_PAT": "ddpat_test",
         },
     ):
         yield
@@ -1154,7 +1153,7 @@ class TestCatalogClient:
     def test_list_catalog_entities_defaults(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             dd._request = MagicMock(return_value={"data": []})
 
@@ -1179,7 +1178,7 @@ class TestTeamsClient:
     def test_list_teams_defaults(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             dd._request = MagicMock(return_value={"data": []})
 
@@ -1200,7 +1199,7 @@ class TestTeamsClient:
     def test_list_teams_builds_query_params(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             dd._request = MagicMock(return_value={"data": []})
 
@@ -1234,7 +1233,7 @@ class TestTeamsClient:
     def test_list_team_memberships_builds_query_params(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             dd._request = MagicMock(return_value={"data": []})
 
@@ -1263,7 +1262,7 @@ class TestTeamsClient:
     def test_list_team_notification_rules(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             dd._request = MagicMock(return_value={"data": []})
 
@@ -1280,7 +1279,7 @@ class TestTeamsClient:
     def test_list_catalog_entities_builds_query_params(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             dd._request = MagicMock(return_value={"data": []})
 
@@ -1570,7 +1569,7 @@ class TestPagerDutyClient:
     def test_get_pagerduty_integration_service(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             expected_response = {
                 "service_name": "datadog-routing-hub",
@@ -1591,7 +1590,7 @@ class TestPagerDutyClient:
     def test_get_pagerduty_integration_service_escapes_spaces(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             expected_response = {
                 "service_name": "datadog routing hub",
@@ -1903,7 +1902,7 @@ class TestDashboardClient:
     def test_create_dashboard_posts_body(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             body = {"title": "t", "layout_type": "ordered", "widgets": []}
             dd._request = MagicMock(return_value={"id": "abc"})
@@ -1920,7 +1919,7 @@ class TestDashboardClient:
     def test_get_dashboard(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             dd._request = MagicMock(return_value={"id": "abc"})
 
@@ -1934,7 +1933,7 @@ class TestDashboardClient:
     def test_list_dashboards_defaults(self):
         from dd_cli.http import DatadogClient
 
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             dd._request = MagicMock(return_value={"dashboards": []})
 
@@ -1947,11 +1946,11 @@ class TestDashboardClient:
 
 
 class TestAuthHeaders:
-    """Tests for how credentials become HTTP auth headers."""
+    """Tests for how the PAT becomes an HTTP auth header."""
 
     def test_pat_uses_bearer_authorization(self):
-        """A PAT authenticates via `Authorization: Bearer` and omits the
-        legacy DD-API-KEY / DD-APPLICATION-KEY headers."""
+        """A PAT authenticates via `Authorization: Bearer` and sets no
+        DD-API-KEY / DD-APPLICATION-KEY headers."""
         from dd_cli.http import DatadogClient
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_secret")
@@ -1963,31 +1962,16 @@ class TestAuthHeaders:
         finally:
             dd.close()
 
-    def test_api_app_keys_use_legacy_headers(self):
-        """The legacy app+api key path still sets both DD headers and no
-        Authorization header (backward compatibility)."""
-        from dd_cli.http import DatadogClient
-
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
-        try:
-            headers = dd._client.headers
-            assert headers.get("dd-api-key") == "a"
-            assert headers.get("dd-application-key") == "b"
-            assert "authorization" not in headers
-        finally:
-            dd.close()
-
-    def test_missing_all_credentials_raises(self):
-        """Constructing a client with neither a PAT nor api+app keys is an
-        error (nothing to authenticate with)."""
+    def test_missing_pat_raises(self):
+        """Constructing a client without a PAT is an error."""
         from dd_cli.http import DatadogClient
 
         with pytest.raises(ValueError):
-            DatadogClient(site="us3.datadoghq.com")
+            DatadogClient(site="us3.datadoghq.com", pat="")
 
-    def test_validate_uses_current_user_for_pat(self):
-        """With a PAT, validate() hits /api/v2/current_user (the API-key-only
-        /api/v1/validate rejects a PAT with 403)."""
+    def test_validate_uses_current_user(self):
+        """validate() hits /api/v2/current_user (a PAT-compatible read; the
+        legacy /api/v1/validate rejects a PAT with 403)."""
         from dd_cli.http import DatadogClient
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
@@ -1998,28 +1982,16 @@ class TestAuthHeaders:
         finally:
             dd.close()
 
-    def test_validate_uses_v1_validate_for_api_key(self):
-        """With an API key, validate() hits the legacy /api/v1/validate."""
-        from dd_cli.http import DatadogClient
-
-        dd = DatadogClient(site="us3.datadoghq.com", api_key="a", app_key="b")
-        try:
-            dd._request = MagicMock(return_value={"valid": True})
-            dd.validate()
-            dd._request.assert_called_once_with("GET", "/api/v1/validate")
-        finally:
-            dd.close()
-
 
 class TestGetClientCredentialSelection:
-    """Tests for _get_client env-var precedence (DD_PAT over app+api)."""
+    """Tests for _get_client reading DD_PAT."""
 
-    def test_prefers_pat_when_set(self):
+    def test_uses_pat_when_set(self):
         from dd_cli.cli import _get_client
 
         with patch.dict(
             "os.environ",
-            {"DD_PAT": "ddpat_x", "DD_API_KEY": "a" * 32, "DD_APP_KEY": "b" * 40},
+            {"DD_PAT": "ddpat_x"},
             clear=True,
         ), patch("dd_cli.cli.DatadogClient") as mock_client_class:
             _get_client("us3.datadoghq.com")
@@ -2027,23 +1999,7 @@ class TestGetClientCredentialSelection:
                 site="us3.datadoghq.com", pat="ddpat_x", timeout=15.0
             )
 
-    def test_falls_back_to_app_api_keys(self):
-        from dd_cli.cli import _get_client
-
-        with patch.dict(
-            "os.environ",
-            {"DD_API_KEY": "a" * 32, "DD_APP_KEY": "b" * 40},
-            clear=True,
-        ), patch("dd_cli.cli.DatadogClient") as mock_client_class:
-            _get_client("us3.datadoghq.com")
-            mock_client_class.assert_called_once_with(
-                site="us3.datadoghq.com",
-                api_key="a" * 32,
-                app_key="b" * 40,
-                timeout=15.0,
-            )
-
-    def test_errors_when_no_credentials(self):
+    def test_errors_when_pat_missing(self):
         import click
 
         from dd_cli.cli import _get_client

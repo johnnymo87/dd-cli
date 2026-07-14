@@ -14,25 +14,18 @@ def _default_site() -> str:
 
 
 def _get_client(site: str, timeout: float = 15.0) -> DatadogClient:
-    """Create a DatadogClient, raising UsageError if credentials are missing.
+    """Create a DatadogClient, raising UsageError if DD_PAT is not set.
 
-    Prefers a Personal Access Token (``DD_PAT``, sent as a Bearer token). Falls
-    back to the legacy ``DD_API_KEY`` + ``DD_APP_KEY`` pair.
+    Authenticates with a Datadog Personal Access Token (``DD_PAT``, sent as a
+    Bearer token).
     """
     pat = env("DD_PAT")
-    if pat:
-        return DatadogClient(site=site, pat=pat, timeout=timeout)
-
-    api_key = env("DD_API_KEY")
-    app_key = env("DD_APP_KEY")
-
-    if not api_key or not app_key:
+    if not pat:
         raise click.UsageError(
-            "Set DD_PAT (a Datadog Personal Access Token, recommended) or both "
-            "DD_API_KEY and DD_APP_KEY."
+            "DD_PAT (a Datadog Personal Access Token) must be set."
         )
 
-    return DatadogClient(site=site, api_key=api_key, app_key=app_key, timeout=timeout)
+    return DatadogClient(site=site, pat=pat, timeout=timeout)
 
 
 def _handle_api_error(e: DatadogAPIError) -> None:

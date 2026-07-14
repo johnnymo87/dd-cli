@@ -8,17 +8,11 @@ CLI for Datadog APIs (incidents, logs, and more).
 # Install
 uv venv && uv pip install -e .[dev]
 
-# Configure — recommended: a Datadog Personal Access Token (PAT).
-# A PAT is a single, scoped, expiring credential sent as a Bearer token;
-# it does not need to be paired with an API key.
+# Configure with a Datadog Personal Access Token (PAT): a single, scoped,
+# expiring credential sent as a Bearer token — no API key pairing needed.
 # https://docs.datadoghq.com/account_management/personal-access-tokens/
 export DD_SITE="us3.datadoghq.com"
 export DD_PAT="ddpat_<your-personal-access-token>"
-
-# Legacy fallback (deprecated): the app+api key pair still works if DD_PAT
-# is unset.
-# export DD_API_KEY="<your-api-key>"
-# export DD_APP_KEY="<your-app-key>"
 
 # Validate
 dd-cli validate

@@ -58,43 +58,26 @@ class DatadogClient:
         self,
         *,
         site: str,
-        api_key: str | None = None,
-        app_key: str | None = None,
-        pat: str | None = None,
+        pat: str,
         timeout: float = 15.0,
     ) -> None:
         """Create a Datadog HTTP client.
 
-        Authentication is either:
-
-        - A Personal Access Token (``pat``), sent as ``Authorization: Bearer``.
-          This is the recommended, single-credential method and does not need
-          an API key.
-        - The legacy app+api key pair (``api_key`` + ``app_key``), sent as the
-          ``DD-API-KEY`` / ``DD-APPLICATION-KEY`` headers.
-
-        A PAT takes precedence when supplied.
+        Authenticates with a Personal Access Token (``pat``), sent as an
+        ``Authorization: Bearer`` header. A PAT is a single, scoped, expiring
+        credential and does not need to be paired with an API key.
         """
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        self._uses_pat = bool(pat)
-        if pat:
-            headers["Authorization"] = f"Bearer {pat}"
-        elif api_key and app_key:
-            headers["DD-API-KEY"] = api_key
-            headers["DD-APPLICATION-KEY"] = app_key
-        else:
-            raise ValueError(
-                "DatadogClient requires either a PAT (pat=...) or both "
-                "api_key and app_key."
-            )
+        if not pat:
+            raise ValueError("DatadogClient requires a PAT (pat=...).")
 
         self._client = httpx.Client(
             base_url=_api_host(site),
             timeout=timeout,
-            headers=headers,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {pat}",
+            },
         )
 
     def close(self) -> None:
@@ -218,16 +201,12 @@ class DatadogClient:
         return self._request("POST", "/api/v2/logs/events/search", json_body=body)
 
     def validate(self) -> dict[str, Any]:
-        """Validate the active credential.
+        """Validate the PAT via /api/v2/current_user.
 
-        The ``/api/v1/validate`` endpoint only validates an API key, so it
-        rejects a PAT (Bearer) with 403. When authenticating with a PAT, hit
-        ``/api/v2/current_user`` instead — a minimal authenticated read that
-        confirms the token works.
+        (The legacy /api/v1/validate endpoint only validates an API key and
+        rejects a PAT with 403, so it is not used.)
         """
-        if self._uses_pat:
-            return self._request("GET", "/api/v2/current_user")
-        return self._request("GET", "/api/v1/validate")
+        return self._request("GET", "/api/v2/current_user")
 
     def list_catalog_entities(
         self,

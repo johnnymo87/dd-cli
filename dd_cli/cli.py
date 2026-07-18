@@ -21,9 +21,7 @@ def _get_client(site: str, timeout: float = 15.0) -> DatadogClient:
     """
     pat = env("DD_PAT")
     if not pat:
-        raise click.UsageError(
-            "DD_PAT (a Datadog Personal Access Token) must be set."
-        )
+        raise click.UsageError("DD_PAT (a Datadog Personal Access Token) must be set.")
 
     return DatadogClient(site=site, pat=pat, timeout=timeout)
 
@@ -922,6 +920,132 @@ def get_dashboard_cmd(
         raise click.ClickException(str(e)) from None
 
     click.echo(json.dumps(data, indent=2))
+
+
+@cli.command("update-dashboard")
+@click.argument("dashboard_id_or_url", metavar="DASHBOARD")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--spec",
+    "spec_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Path to a JSON file containing the full dashboard request body "
+        "(title, layout_type, widgets, template_variables, ...). "
+        "The PUT is a FULL REPLACE, so the body must be complete. "
+        "Convenience flags below override matching keys in the file."
+    ),
+)
+@click.option("--title", default=None, help="Dashboard title (overrides --spec).")
+@click.option(
+    "--description", default=None, help="Dashboard description (overrides --spec)."
+)
+@click.option(
+    "--layout-type",
+    type=click.Choice(["ordered", "free"]),
+    default=None,
+    help="Layout type. Defaults to 'ordered' when not set here or in --spec.",
+)
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Dashboard tag (repeatable, e.g., --tag team:fbm --tag managed-by:dd-cli).",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def update_dashboard_cmd(
+    dashboard_id_or_url: str,
+    site: str,
+    spec_path: Path | None,
+    title: str | None,
+    description: str | None,
+    layout_type: str | None,
+    tags: tuple[str, ...],
+    timeout: float,
+) -> None:
+    """Update (replace) a Datadog dashboard by ID or URL.
+
+    The Datadog dashboard PUT is a FULL REPLACE: the body must contain the
+    complete dashboard definition (title, layout_type, widgets, template
+    variables, ...). Supply it via --spec, a JSON file holding the request
+    body -- typically the output of `dd-cli get-dashboard` with your edits.
+    Convenience flags let you set or override the title, description, layout
+    type, and tags without editing the file. The body is otherwise passed
+    through as-is, so existing widgets are never silently wiped.
+
+    Accepts a dashboard ID or a full Datadog dashboard URL.
+
+    \b
+    Example:
+        dd-cli get-dashboard abc-def-ghi > dashboard.json
+        # ...edit dashboard.json...
+        dd-cli update-dashboard abc-def-ghi \\
+            --spec dashboard.json \\
+            --title 'My service overview'
+    """
+    dashboard_id = _parse_dashboard_ref(dashboard_id_or_url)
+
+    body: dict[str, Any] = {}
+    if spec_path is not None:
+        try:
+            with spec_path.open("r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            raise click.UsageError(f"Failed to read --spec JSON: {e}") from None
+        if not isinstance(loaded, dict):
+            raise click.UsageError("--spec JSON must be an object (the request body).")
+        body = loaded
+
+    if title is not None:
+        body["title"] = title
+    if description is not None:
+        body["description"] = description
+    if layout_type is not None:
+        body["layout_type"] = layout_type
+    if tags:
+        body["tags"] = list(tags)
+
+    # layout_type is required by the DD API; fill only if absent (never
+    # overrides a value from --spec). Do NOT setdefault widgets: the PUT is a
+    # full replace, so an empty default would wipe the dashboard's widgets.
+    body.setdefault("layout_type", "ordered")
+
+    if not body.get("title"):
+        raise click.UsageError(
+            "A dashboard title is required. Pass --title or include it in --spec."
+        )
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.update_dashboard(dashboard_id, body=body)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    click.echo(
+        json.dumps(
+            {
+                "id": data.get("id"),
+                "url": _dashboard_url(site, data),
+                "title": data.get("title"),
+            },
+            indent=2,
+        )
+    )
 
 
 _DASHBOARD_SUMMARY_FIELDS = ("id", "title", "url", "layout_type", "author_handle")

@@ -1774,6 +1774,176 @@ class TestCreateDashboard:
             assert output["url"] == "https://us3.datadoghq.com/dashboard/no-url-id"
 
 
+class TestUpdateDashboard:
+    """Tests for update-dashboard command."""
+
+    def _spec_file(self, tmp_path, body):
+        spec = tmp_path / "dashboard.json"
+        spec.write_text(json.dumps(body), encoding="utf-8")
+        return str(spec)
+
+    def test_update_dashboard_from_spec(self, runner, mock_env, tmp_path):
+        """Verify --spec body is sent as-is (PUT) and id/url/title printed."""
+        spec_body = {
+            "title": "My dashboard",
+            "layout_type": "ordered",
+            "widgets": [{"definition": {"type": "note", "content": "hi"}}],
+        }
+        spec_path = self._spec_file(tmp_path, spec_body)
+        update_response = {
+            "id": "abc-def-ghi",
+            "title": "My dashboard",
+            "url": "/dashboard/abc-def-ghi/my-dashboard",
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.update_dashboard.return_value = update_response
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["update-dashboard", "abc-def-ghi", "--spec", spec_path]
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.update_dashboard.assert_called_once_with(
+                "abc-def-ghi", body=spec_body
+            )
+            output = json.loads(result.output)
+            assert output["id"] == "abc-def-ghi"
+            assert output["url"] == (
+                "https://us3.datadoghq.com/dashboard/abc-def-ghi/my-dashboard"
+            )
+            assert output["title"] == "My dashboard"
+
+    def test_update_dashboard_from_url(self, runner, mock_env, tmp_path):
+        """Verify update-dashboard extracts the ID from a full Datadog URL."""
+        spec_path = self._spec_file(
+            tmp_path, {"title": "t", "layout_type": "ordered", "widgets": []}
+        )
+        url = "https://us3.datadoghq.com/dashboard/abc-def-ghi/my-dashboard-slug"
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.update_dashboard.return_value = {"id": "abc-def-ghi"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["update-dashboard", url, "--spec", spec_path])
+
+            assert result.exit_code == 0, result.output
+            # ID parsed from URL, body passed through as-is.
+            mock_client.update_dashboard.assert_called_once_with(
+                "abc-def-ghi",
+                body={"title": "t", "layout_type": "ordered", "widgets": []},
+            )
+
+    def test_update_dashboard_flags_override_spec(self, runner, mock_env, tmp_path):
+        """Verify --title/--description/--layout-type/--tag override spec keys."""
+        spec_path = self._spec_file(
+            tmp_path,
+            {
+                "title": "old",
+                "widgets": [{"definition": {"type": "note", "content": "keep"}}],
+                "layout_type": "free",
+            },
+        )
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.update_dashboard.return_value = {"id": "xyz"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                [
+                    "update-dashboard",
+                    "xyz",
+                    "--spec",
+                    spec_path,
+                    "--title",
+                    "new title",
+                    "--description",
+                    "desc",
+                    "--layout-type",
+                    "ordered",
+                    "--tag",
+                    "team:fbm",
+                    "--tag",
+                    "managed-by:dd-cli",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            # Widgets from the spec are preserved (never wiped by a default).
+            mock_client.update_dashboard.assert_called_once_with(
+                "xyz",
+                body={
+                    "title": "new title",
+                    "widgets": [{"definition": {"type": "note", "content": "keep"}}],
+                    "layout_type": "ordered",
+                    "description": "desc",
+                    "tags": ["team:fbm", "managed-by:dd-cli"],
+                },
+            )
+
+    def test_update_dashboard_does_not_wipe_widgets(self, runner, mock_env):
+        """Verify no widgets default is injected (full-replace safety)."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.update_dashboard.return_value = {"id": "xyz"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["update-dashboard", "xyz", "--title", "Just a title"]
+            )
+
+            assert result.exit_code == 0, result.output
+            # layout_type is defaulted, but widgets is NOT added.
+            mock_client.update_dashboard.assert_called_once_with(
+                "xyz",
+                body={"title": "Just a title", "layout_type": "ordered"},
+            )
+
+    def test_update_dashboard_requires_title(self, runner, mock_env, tmp_path):
+        """Verify a missing title (no flag, none in spec) is a usage error."""
+        spec_path = self._spec_file(tmp_path, {"widgets": []})
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["update-dashboard", "xyz", "--spec", spec_path]
+            )
+
+            assert result.exit_code != 0
+            assert "title is required" in result.output
+            mock_client.update_dashboard.assert_not_called()
+
+    def test_update_dashboard_url_fallback_from_id(self, runner, mock_env):
+        """Verify the URL falls back to /dashboard/{id} when url is absent."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.update_dashboard.return_value = {"id": "no-url-id"}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["update-dashboard", "no-url-id", "--title", "t"]
+            )
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.output)
+            assert output["url"] == "https://us3.datadoghq.com/dashboard/no-url-id"
+
+
 class TestGetDashboard:
     """Tests for get-dashboard command."""
 
@@ -1916,6 +2086,27 @@ class TestDashboardClient:
         finally:
             dd.close()
 
+    def test_update_dashboard_puts_body(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
+        try:
+            body = {
+                "title": "t",
+                "layout_type": "ordered",
+                "widgets": [{"definition": {"type": "note", "content": "hi"}}],
+            }
+            dd._request = MagicMock(return_value={"id": "abc"})
+
+            result = dd.update_dashboard("abc", body=body)
+
+            assert result == {"id": "abc"}
+            dd._request.assert_called_once_with(
+                "PUT", "/api/v1/dashboard/abc", json_body=body
+            )
+        finally:
+            dd.close()
+
     def test_get_dashboard(self):
         from dd_cli.http import DatadogClient
 
@@ -1989,11 +2180,14 @@ class TestGetClientCredentialSelection:
     def test_uses_pat_when_set(self):
         from dd_cli.cli import _get_client
 
-        with patch.dict(
-            "os.environ",
-            {"DD_PAT": "ddpat_x"},
-            clear=True,
-        ), patch("dd_cli.cli.DatadogClient") as mock_client_class:
+        with (
+            patch.dict(
+                "os.environ",
+                {"DD_PAT": "ddpat_x"},
+                clear=True,
+            ),
+            patch("dd_cli.cli.DatadogClient") as mock_client_class,
+        ):
             _get_client("us3.datadoghq.com")
             mock_client_class.assert_called_once_with(
                 site="us3.datadoghq.com", pat="ddpat_x", timeout=15.0

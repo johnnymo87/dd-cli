@@ -62,6 +62,7 @@ dd-cli get-incident 152 --enrich
 | `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
 | `dd-cli create-dashboard` | Create a dashboard from a `--spec` JSON body (+ title/tags flags) |
 | `dd-cli get-dashboard ID_OR_URL` | Get a dashboard's full definition by ID or URL |
+| `dd-cli update-dashboard ID_OR_URL` | Update (full replace) a dashboard from a `--spec` JSON body (+ title/tags flags) |
 | `dd-cli list-dashboards` | List dashboards, optionally filtered by title |
 | `dd-cli list-teams` | List/search Datadog Teams by name, handle, or member email |
 | `dd-cli find-user-teams MEMBER` | Find Datadog Teams matching a user/member email or name |

@@ -464,6 +464,18 @@ class DatadogClient:
         """
         return self._request("POST", "/api/v1/dashboard", json_body=body)
 
+    def update_dashboard(
+        self, dashboard_id: str, *, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Update (replace) a dashboard by ID (PUT /api/v1/dashboard/{id}).
+
+        The Datadog dashboard PUT is a full replace: the body must be the
+        complete dashboard request object (title, layout_type, widgets,
+        template_variables, etc.). It is sent as-is so callers can supply the
+        exact widget/layout definition.
+        """
+        return self._request("PUT", f"/api/v1/dashboard/{dashboard_id}", json_body=body)
+
     def get_dashboard(self, dashboard_id: str) -> dict[str, Any]:
         """Get a dashboard's full definition by ID."""
         return self._request("GET", f"/api/v1/dashboard/{dashboard_id}")

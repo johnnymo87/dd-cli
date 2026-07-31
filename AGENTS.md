@@ -36,10 +36,10 @@ dd-cli validate
 | `dd-cli get-incident ID` | Get incident by ID (with optional `--enrich`) |
 | `dd-cli update-incident ID` | Update incident fields |
 | `dd-cli create-log-metric ID` | Create a log-based count metric (works with flex tier) |
-| `dd-cli create-monitor` | Create a monitor (metric alert, query alert, etc.) |
+| `dd-cli create-monitor` | Create a monitor (metric/query/trace-analytics alert) with full `options` support |
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd-cli list-monitors` | List monitors, filtered by tag and/or name (auto-paginates) |
-| `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, thresholds, etc. |
+| `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, tags, thresholds and `options` (merge, not clobber) |
 | `dd-cli create-dashboard` | Create a dashboard from a `--spec` JSON body (+ title/tags flags) |
 | `dd-cli get-dashboard ID_OR_URL` | Get a dashboard's full definition by ID or URL |
 | `dd-cli update-dashboard ID_OR_URL` | Update (full replace) a dashboard from a `--spec` JSON body (+ title/tags flags) |

@@ -104,6 +104,72 @@ dd-cli create-monitor \
   --renotify-interval 30
 ```
 
+# DEAD-MAN SWITCH (no-signal monitor). BOTH halves are required:
+# a count query that goes silent evaluates to No Data, NOT to 0, so the
+# '< 1' threshold alone never fires. notify_no_data + no_data_timeframe
+# is what actually pages.
+dd-cli create-monitor \
+  --name 'offset scanner: NO SIGNAL — silent >45m [{{env.name}}]' \
+  --type 'trace-analytics alert' \
+  --query 'trace-analytics("service:offset-scanner operation_name:scan").rollup("count").by("env").last("45m") < 1' \
+  --message '{{#is_alert}}Scanner silent for 45m (expected every 15m){{/is_alert}} @slack-alerts' \
+  --notify-no-data --no-data-timeframe 60 \
+  --new-group-delay 300 --renotify-interval 60 \
+  --priority 2
+```
+
+### Monitor options: flags, escape hatch, precedence
+
+Both `create-monitor` and `update-monitor` share the same set of
+`options` flags:
+
+| Flag | `options` key | Notes |
+| --- | --- | --- |
+| `--critical` / `--warning` | `thresholds.critical` / `.warning` | |
+| `--critical-recovery` / `--warning-recovery` | `thresholds.*_recovery` | Anti-flapping |
+| `--notify-no-data` / `--no-notify-no-data` | `notify_no_data` | Requires `--no-data-timeframe` |
+| `--no-data-timeframe N` | `no_data_timeframe` | Minutes; use >= 2x the query window |
+| `--on-missing-data` | `on_missing_data` | Newer API; supersedes the two above |
+| `--new-group-delay N` | `new_group_delay` | Seconds; grace period for new groups |
+| `--evaluation-delay N` | `evaluation_delay` | Seconds; for late/backfilled data |
+| `--notify-audit` / `--no-notify-audit` | `notify_audit` | |
+| `--include-tags` / `--no-include-tags` | `include_tags` | DD default is `true` |
+| `--require-full-window` / `--no-require-full-window` | `require_full_window` | Off for sparse metrics |
+| `--timeout-h N` | `timeout_h` | Auto-resolve after N hours |
+| `--renotify-interval N` | `renotify_interval` | Minutes, 0 disables |
+| `--renotify-occurrences N` | `renotify_occurrences` | Needs `--renotify-interval` |
+| `--renotify-status S` | `renotify_statuses` | Repeatable: `alert`, `warn`, `no data` |
+| `--escalation-message` | `escalation_message` | Needs `--renotify-interval` |
+| `--group-retention-duration` | `group_retention_duration` | e.g. `2d` (60m-72h) |
+| `--notification-preset-name` | `notification_preset_name` | `show_all`, `hide_query`, ... |
+| `--option KEY=VALUE` | any key | Repeatable escape hatch |
+
+`--option` values are JSON-parsed when they look like JSON, so numbers,
+booleans, `null`, arrays and objects all work; anything else stays a
+string:
+
+```bash
+dd-cli create-monitor ... \
+  --option 'notify_by=["env"]' \
+  --option 'scheduling_options={"evaluation_window": {"day_starts": "04:00"}}' \
+  --option min_location_failed=2
+```
+
+**Precedence (highest first):**
+1. first-class flags (e.g. `--no-data-timeframe 60`)
+2. `--option KEY=VALUE`
+3. the monitor's existing options (`update-monitor` only)
+4. Datadog defaults
+
+### The no-data guard
+
+dd-cli refuses `notify_no_data: true` without `no_data_timeframe`
+(unless `on_missing_data` is set, which supersedes both). Without a
+timeframe Datadog has no window over which to declare data missing, so
+the no-data alert never fires -- a dead-man switch that is itself
+silently dead. Fix with `--no-data-timeframe N` or
+`--on-missing-data show_and_notify_no_data`.
+
 ## Update a Monitor
 
 ```bash
@@ -121,7 +187,22 @@ dd-cli update-monitor 'https://us3.datadoghq.com/monitors/12345678' \
   --renotify-interval 30
 ```
 
-Only the specified fields are updated; everything else is left unchanged.
+Top-level fields you do not pass are left unchanged.
+
+**Options are merged, not clobbered.** Datadog's `PUT /api/v1/monitor/{id}`
+replaces the whole `options` object when the body contains one, so a naive
+partial update resets everything it omits (thresholds, `no_data_timeframe`,
+`evaluation_delay`, ...). Whenever an option flag is passed, dd-cli first
+`GET`s the monitor and PUTs its existing options with your changes applied on
+top (`thresholds` is merged one level deeper too).
+
+```bash
+# Repair a broken dead-man switch without touching its other options
+dd-cli update-monitor 12345678 --notify-no-data --no-data-timeframe 60
+
+# Replace the tag list (pass every tag you want to keep)
+dd-cli update-monitor 12345678 --tag managed-by:dd-cli --tag team:platform
+```
 
 ### update-monitor Options
 
@@ -130,10 +211,9 @@ Only the specified fields are updated; everything else is left unchanged.
 | `--name` | Update monitor name |
 | `--query` | Update monitor query |
 | `--message` | Update notification message |
-| `--critical` | Update critical threshold |
-| `--warning` | Update warning threshold |
+| `--tag` | Monitor tag (repeatable); REPLACES the existing tag list |
 | `--priority` | Update priority (1-5) |
-| `--renotify-interval` | Minutes between re-notifications (0 to disable) |
+| *(all shared option flags)* | See "Monitor options" above -- same flags as `create-monitor` |
 | `--timeout` | Request timeout in seconds |
 
 ### API Details
@@ -173,8 +253,7 @@ dd-cli update-monitor 12345678 \
 | `--critical` | no | Critical threshold |
 | `--warning` | no | Warning threshold |
 | `--priority` | no | Priority 1-5 |
-| `--renotify-interval` | no | Minutes between re-notifications |
-| `--notify-no-data` | no | Alert on missing data |
+| *(all shared option flags)* | no | See "Monitor options" above (`--no-data-timeframe`, `--new-group-delay`, `--option KEY=VALUE`, ...) |
 
 ## Monitor Types
 

@@ -427,6 +427,319 @@ def create_log_metric_cmd(
     click.echo(json.dumps(data, indent=2))
 
 
+# ── Monitor options (shared by create-monitor / update-monitor) ─────────
+#
+# Datadog keeps almost every monitor behaviour knob inside the `options`
+# object of the monitor payload. dd-cli exposes the commonly-needed ones as
+# first-class flags, plus a generic `--option KEY=VALUE` escape hatch so a
+# missing flag can never block a user again.
+#
+# Precedence (documented in both commands' --help):
+#   1. first-class flags (e.g. --no-data-timeframe) -- highest
+#   2. --option KEY=VALUE overrides
+#   3. the monitor's existing options (update-monitor only)
+#   4. Datadog's own defaults
+
+# Flag dest name -> Datadog options key. All of these are 1:1 today, but the
+# indirection keeps the mapping explicit and greppable.
+_MONITOR_SIMPLE_OPTION_FLAGS: dict[str, str] = {
+    "notify_no_data": "notify_no_data",
+    "no_data_timeframe": "no_data_timeframe",
+    "on_missing_data": "on_missing_data",
+    "new_group_delay": "new_group_delay",
+    "evaluation_delay": "evaluation_delay",
+    "notify_audit": "notify_audit",
+    "include_tags": "include_tags",
+    "require_full_window": "require_full_window",
+    "timeout_h": "timeout_h",
+    "renotify_interval": "renotify_interval",
+    "renotify_occurrences": "renotify_occurrences",
+    "escalation_message": "escalation_message",
+    "group_retention_duration": "group_retention_duration",
+    "notification_preset_name": "notification_preset_name",
+}
+
+# Flag dest name -> key inside options["thresholds"].
+_MONITOR_THRESHOLD_FLAGS: dict[str, str] = {
+    "critical": "critical",
+    "warning": "warning",
+    "critical_recovery": "critical_recovery",
+    "warning_recovery": "warning_recovery",
+}
+
+_ON_MISSING_DATA_CHOICES = (
+    "default",
+    "show_no_data",
+    "show_and_notify_no_data",
+    "resolve",
+)
+
+_NOTIFICATION_PRESET_CHOICES = (
+    "show_all",
+    "hide_query",
+    "hide_handles",
+    "hide_all",
+)
+
+
+def monitor_option_flags(f: Any) -> Any:
+    """Attach the shared monitor `options` flags to a command.
+
+    The decorated command should accept `**monitor_opts` and pass it to
+    `_build_monitor_options`.
+    """
+    options = [
+        click.option("--critical", type=float, help="Critical threshold"),
+        click.option("--warning", type=float, help="Warning threshold"),
+        click.option(
+            "--critical-recovery",
+            type=float,
+            help="Critical recovery threshold (monitor resolves below/above this)",
+        ),
+        click.option(
+            "--warning-recovery", type=float, help="Warning recovery threshold"
+        ),
+        click.option(
+            "--notify-no-data/--no-notify-no-data",
+            default=None,
+            help=(
+                "Alert when no data is received. Requires --no-data-timeframe "
+                "(dd-cli refuses the combination without it)."
+            ),
+        ),
+        click.option(
+            "--no-data-timeframe",
+            type=int,
+            help=(
+                "Minutes of missing data before the no-data alert fires. "
+                "Datadog recommends at least 2x the query's evaluation window."
+            ),
+        ),
+        click.option(
+            "--on-missing-data",
+            type=click.Choice(_ON_MISSING_DATA_CHOICES),
+            help=(
+                "Newer missing-data behaviour. Supersedes notify_no_data / "
+                "no_data_timeframe on the monitor types that support it."
+            ),
+        ),
+        click.option(
+            "--new-group-delay",
+            type=int,
+            help="Seconds to skip evaluation for newly-detected groups",
+        ),
+        click.option(
+            "--evaluation-delay",
+            type=int,
+            help="Seconds to delay evaluation (for late-arriving/backfilled data)",
+        ),
+        click.option(
+            "--notify-audit/--no-notify-audit",
+            default=None,
+            help="Notify tagged handles when the monitor itself is modified",
+        ),
+        click.option(
+            "--include-tags/--no-include-tags",
+            default=None,
+            help="Include triggering tags in the notification title "
+            "(Datadog default: true)",
+        ),
+        click.option(
+            "--require-full-window/--no-require-full-window",
+            default=None,
+            help="Only evaluate once the full window has data (sparse metrics: off)",
+        ),
+        click.option(
+            "--timeout-h",
+            type=int,
+            help="Hours before a triggered monitor auto-resolves (options.timeout_h)",
+        ),
+        click.option(
+            "--renotify-interval",
+            type=int,
+            help="Minutes between re-notifications (0 to disable)",
+        ),
+        click.option(
+            "--renotify-occurrences",
+            type=int,
+            help="Max number of re-notifications (requires --renotify-interval)",
+        ),
+        click.option(
+            "--renotify-status",
+            "renotify_status",
+            multiple=True,
+            help=(
+                "Status that triggers re-notification (repeatable): "
+                "alert, warn, no data"
+            ),
+        ),
+        click.option(
+            "--escalation-message",
+            help="Message sent on re-notification (requires --renotify-interval)",
+        ),
+        click.option(
+            "--group-retention-duration",
+            help="How long inactive groups are retained, e.g. '2d' (60m-72h)",
+        ),
+        click.option(
+            "--notification-preset-name",
+            type=click.Choice(_NOTIFICATION_PRESET_CHOICES),
+            help="How much monitor detail to show in notifications",
+        ),
+        click.option(
+            "--option",
+            "option",
+            multiple=True,
+            metavar="KEY=VALUE",
+            help=(
+                "Escape hatch: set any monitor option not covered by a flag. "
+                "Repeatable. VALUE is JSON-parsed when it looks like JSON "
+                "(numbers, true/false, null, arrays, objects), otherwise it is "
+                "kept as a string. First-class flags win on conflict."
+            ),
+        ),
+    ]
+    for option in reversed(options):
+        f = option(f)
+    return f
+
+
+def _parse_monitor_option_overrides(pairs: tuple[str, ...]) -> dict[str, Any]:
+    """Parse repeated ``--option KEY=VALUE`` pairs into an options dict.
+
+    Values are JSON-parsed so numbers, booleans, null, arrays and objects all
+    work. A value that is not valid JSON is kept as a plain string (so
+    ``--option on_missing_data=resolve`` does the obvious thing), *unless* it
+    starts with a JSON structural character, in which case malformed JSON is a
+    hard error rather than a silently-stringified typo.
+    """
+    parsed: dict[str, Any] = {}
+    for pair in pairs:
+        key, sep, raw_value = pair.partition("=")
+        if not sep:
+            raise click.UsageError(
+                f"Malformed --option {pair!r}: expected KEY=VALUE, "
+                "e.g. --option no_data_timeframe=60 or --option 'notify_by=[\"env\"]'"
+            )
+        key = key.strip()
+        if not key:
+            raise click.UsageError(
+                f"Malformed --option {pair!r}: the key must not be empty."
+            )
+        looks_like_json = raw_value[:1] in {"{", "[", '"'}
+        try:
+            parsed[key] = json.loads(raw_value)
+        except json.JSONDecodeError:
+            if looks_like_json:
+                raise click.UsageError(
+                    f"Malformed --option {pair!r}: the value starts with "
+                    f"{raw_value[:1]!r} so it is parsed as JSON, but it is not "
+                    "valid JSON."
+                ) from None
+            parsed[key] = raw_value
+    return parsed
+
+
+def _build_monitor_options(monitor_opts: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the `options` dict from the shared monitor option flags.
+
+    Only options the caller actually specified are included; unset flags are
+    omitted entirely so the caller never clobbers a Datadog default (or, on
+    update, an existing value) by accident.
+    """
+    options: dict[str, Any] = _parse_monitor_option_overrides(
+        monitor_opts.get("option") or ()
+    )
+
+    for dest, key in _MONITOR_SIMPLE_OPTION_FLAGS.items():
+        value = monitor_opts.get(dest)
+        if value is not None:
+            options[key] = value
+
+    statuses = monitor_opts.get("renotify_status") or ()
+    if statuses:
+        options["renotify_statuses"] = list(statuses)
+
+    thresholds: dict[str, float] = {}
+    for dest, key in _MONITOR_THRESHOLD_FLAGS.items():
+        value = monitor_opts.get(dest)
+        if value is not None:
+            thresholds[key] = value
+    if thresholds:
+        existing = options.get("thresholds")
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.update(thresholds)
+        options["thresholds"] = merged
+
+    return options
+
+
+def _existing_monitor_options(dd: DatadogClient, monitor_id: str) -> dict[str, Any]:
+    """Read a monitor's current `options` object (for read-modify-write)."""
+    monitor = dd.get_monitor(monitor_id)
+    existing = monitor.get("options")
+    return dict(existing) if isinstance(existing, dict) else {}
+
+
+def _merge_monitor_options(
+    existing: dict[str, Any], updates: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge caller-specified options onto a monitor's existing options.
+
+    Datadog's PUT /api/v1/monitor/{id} replaces the whole `options` object
+    rather than merging into it, so sending only the changed keys silently
+    resets everything else (thresholds, no_data_timeframe, evaluation_delay
+    ...). Merging here keeps the update PATCH-shaped from the caller's point
+    of view. `thresholds` is merged one level deeper for the same reason.
+    """
+    merged = dict(existing)
+    merged.update(updates)
+
+    if "thresholds" in updates:
+        prior = existing.get("thresholds")
+        base = dict(prior) if isinstance(prior, dict) else {}
+        base.update(updates["thresholds"])
+        merged["thresholds"] = base
+
+    return merged
+
+
+def _validate_no_data_options(options: dict[str, Any]) -> None:
+    """Refuse a monitor whose no-data alerting can never fire.
+
+    `notify_no_data: true` without `no_data_timeframe` is the classic silent
+    dead-man-switch bug: Datadog has no window over which to decide that data
+    is missing, so the no-data alert never fires and the monitor that exists
+    to catch silence is itself silently dead.
+    """
+    if options.get("notify_no_data") is not True:
+        return
+    if options.get("on_missing_data"):
+        # on_missing_data supersedes notify_no_data / no_data_timeframe.
+        return
+    if options.get("no_data_timeframe") is not None:
+        return
+
+    raise click.UsageError(
+        "Refusing to write a monitor with notify_no_data=true and no "
+        "no_data_timeframe.\n"
+        "\n"
+        "Why this is a real bug, not a nit: no_data_timeframe is the window "
+        "Datadog uses to decide that data has stopped arriving. Without it the "
+        "no-data alert cannot fire, so a 'no signal' / dead-man-switch monitor "
+        "is itself silently dead -- exactly the failure mode it exists to "
+        "catch. This matters most for count-style queries (e.g. "
+        'trace-analytics(...).rollup("count") < 1): when the group goes '
+        "completely silent the monitor evaluates to No Data, NOT to 0, so the "
+        "'< 1' threshold never triggers either. Both halves are needed.\n"
+        "\n"
+        "Fix: add --no-data-timeframe N (minutes; use at least 2x the query's "
+        "evaluation window), or use --on-missing-data "
+        "show_and_notify_no_data on monitor types that support it, or drop "
+        "--notify-no-data."
+    )
+
+
 @cli.command("create-monitor")
 @click.option(
     "--site",
@@ -454,19 +767,8 @@ def create_log_metric_cmd(
     multiple=True,
     help="Monitor tag (can be repeated, e.g., --tag team:my-team --tag env:prod)",
 )
-@click.option("--critical", type=float, help="Critical threshold")
-@click.option("--warning", type=float, help="Warning threshold")
 @click.option("--priority", type=int, help="Monitor priority (1-5)")
-@click.option(
-    "--renotify-interval",
-    type=int,
-    help="Minutes between re-notifications (0 to disable)",
-)
-@click.option(
-    "--notify-no-data/--no-notify-no-data",
-    default=False,
-    help="Alert when no data is received",
-)
+@monitor_option_flags
 @click.option(
     "--timeout",
     type=float,
@@ -481,17 +783,18 @@ def create_monitor_cmd(
     query: str,
     message: str,
     tags: tuple[str, ...],
-    critical: float | None,
-    warning: float | None,
     priority: int | None,
-    renotify_interval: int | None,
-    notify_no_data: bool,
     timeout: float,
+    **monitor_opts: Any,
 ) -> None:
     """Create a Datadog monitor.
 
-    Example (metric monitor on a log-based metric):
+    Monitor `options` come from the first-class flags below plus the generic
+    `--option KEY=VALUE` escape hatch. Precedence: first-class flags win over
+    `--option`, and anything left unset is left to Datadog's defaults.
 
+    \b
+    Example (metric monitor on a log-based metric):
         dd-cli create-monitor \\
             --name 'My Service: Kafka topic errors' \\
             --type 'query alert' \\
@@ -499,20 +802,18 @@ def create_monitor_cmd(
             --message '{{#is_alert}}Kafka errors > {{threshold}}{{/is_alert}} @slack' \\
             --critical 100 --warning 50 \\
             --tag team:my-team --tag service:my-service
-    """
-    options: dict[str, Any] = {
-        "notify_no_data": notify_no_data,
-        "include_tags": True,
-    }
-    thresholds: dict[str, float] = {}
-    if critical is not None:
-        thresholds["critical"] = critical
-    if warning is not None:
-        thresholds["warning"] = warning
-    if thresholds:
-        options["thresholds"] = thresholds
-    if renotify_interval is not None:
-        options["renotify_interval"] = renotify_interval
+
+    \b
+    Example (dead-man switch -- needs BOTH halves to actually fire):
+        dd-cli create-monitor \\
+            --name 'scanner: NO SIGNAL' \\
+            --type 'trace-analytics alert' \\
+            --query 'trace-analytics("service:scanner").rollup("count").last("45m") < 1' \\
+            --message 'scanner silent @slack-alerts' \\
+            --notify-no-data --no-data-timeframe 60 --new-group-delay 300
+    """  # noqa: E501
+    options = _build_monitor_options(monitor_opts)
+    _validate_no_data_options(options)
 
     try:
         with _get_client(site, timeout=timeout) as dd:
@@ -1948,14 +2249,17 @@ def _team_summary(team: dict[str, Any]) -> dict[str, Any]:
 @click.option("--name", help="Update monitor name")
 @click.option("--query", help="Update monitor query")
 @click.option("--message", help="Update notification message")
-@click.option("--critical", type=float, help="Update critical threshold")
-@click.option("--warning", type=float, help="Update warning threshold")
-@click.option("--priority", type=int, help="Update priority (1-5)")
 @click.option(
-    "--renotify-interval",
-    type=int,
-    help="Minutes between re-notifications (0 to disable)",
+    "--tag",
+    "tags",
+    multiple=True,
+    help=(
+        "Monitor tag (repeatable). REPLACES the monitor's existing tag list; "
+        "pass every tag you want to keep."
+    ),
 )
+@click.option("--priority", type=int, help="Update priority (1-5)")
+@monitor_option_flags
 @click.option(
     "--timeout",
     type=float,
@@ -1969,21 +2273,29 @@ def update_monitor_cmd(
     name: str | None,
     query: str | None,
     message: str | None,
-    critical: float | None,
-    warning: float | None,
+    tags: tuple[str, ...],
     priority: int | None,
-    renotify_interval: int | None,
     timeout: float,
+    **monitor_opts: Any,
 ) -> None:
     """Update a Datadog monitor by ID or URL.
 
-    Only the specified fields are updated; others are left unchanged.
+    Top-level fields you do not pass are left unchanged.
 
-    Example:
+    Options are merged, not clobbered: a PUT that carries a partial `options`
+    object resets every option it omits, so whenever any option flag is given
+    dd-cli first GETs the monitor and PUTs its existing options with your
+    changes applied on top. Precedence: first-class flags > --option
+    KEY=VALUE > the monitor's existing options.
 
     \b
+    Examples:
         dd-cli update-monitor 16440468 \\
             --query 'min(last_15m):sum:my.metric{*} > 0'
+    \b
+        # Make an existing no-signal monitor actually able to fire.
+        dd-cli update-monitor 16440468 \\
+            --notify-no-data --no-data-timeframe 60
     """
     monitor_id = _parse_monitor_ref(monitor_id_or_url)
 
@@ -1994,29 +2306,25 @@ def update_monitor_cmd(
         payload["query"] = query
     if message is not None:
         payload["message"] = message
+    if tags:
+        payload["tags"] = list(tags)
     if priority is not None:
         payload["priority"] = priority
 
-    options: dict[str, Any] = {}
-    thresholds: dict[str, float] = {}
-    if critical is not None:
-        thresholds["critical"] = critical
-    if warning is not None:
-        thresholds["warning"] = warning
-    if thresholds:
-        options["thresholds"] = thresholds
-    if renotify_interval is not None:
-        options["renotify_interval"] = renotify_interval
-    if options:
-        payload["options"] = options
+    new_options = _build_monitor_options(monitor_opts)
 
-    if not payload:
+    if not payload and not new_options:
         raise click.UsageError(
             "No updates specified. Use --help to see available options."
         )
 
     try:
         with _get_client(site, timeout=timeout) as dd:
+            if new_options:
+                existing_options = _existing_monitor_options(dd, monitor_id)
+                merged = _merge_monitor_options(existing_options, new_options)
+                _validate_no_data_options(merged)
+                payload["options"] = merged
             data = dd.update_monitor(monitor_id, payload=payload)
     except DatadogAPIError as e:
         _handle_api_error(e)

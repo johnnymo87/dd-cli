@@ -2201,3 +2201,500 @@ class TestGetClientCredentialSelection:
         with patch.dict("os.environ", {}, clear=True):
             with pytest.raises(click.UsageError):
                 _get_client("us3.datadoghq.com")
+
+
+class TestMonitorOptionOverrideParser:
+    """Tests for the --option KEY=VALUE escape hatch parser."""
+
+    def test_parses_json_scalars(self):
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        parsed = _parse_monitor_option_overrides(
+            (
+                "no_data_timeframe=60",
+                "notify_audit=true",
+                "evaluation_delay=0",
+                "escalation_message=still broken",
+            )
+        )
+        assert parsed == {
+            "no_data_timeframe": 60,
+            "notify_audit": True,
+            "evaluation_delay": 0,
+            "escalation_message": "still broken",
+        }
+
+    def test_parses_json_objects_and_arrays(self):
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        parsed = _parse_monitor_option_overrides(
+            (
+                'scheduling_options={"evaluation_window": {"day_starts": "04:00"}}',
+                'renotify_statuses=["alert", "no data"]',
+                "notify_by=null",
+            )
+        )
+        assert parsed["scheduling_options"] == {
+            "evaluation_window": {"day_starts": "04:00"}
+        }
+        assert parsed["renotify_statuses"] == ["alert", "no data"]
+        assert parsed["notify_by"] is None
+
+    def test_bare_string_value_is_kept_as_string(self):
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        parsed = _parse_monitor_option_overrides(("on_missing_data=resolve",))
+        assert parsed == {"on_missing_data": "resolve"}
+
+    def test_value_may_contain_equals_sign(self):
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        parsed = _parse_monitor_option_overrides(("escalation_message=a=b",))
+        assert parsed == {"escalation_message": "a=b"}
+
+    def test_missing_equals_is_a_usage_error(self):
+        import click
+
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        with pytest.raises(click.UsageError) as exc:
+            _parse_monitor_option_overrides(("no_data_timeframe",))
+        assert "KEY=VALUE" in str(exc.value)
+
+    def test_empty_key_is_a_usage_error(self):
+        import click
+
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        with pytest.raises(click.UsageError):
+            _parse_monitor_option_overrides(("=5",))
+
+    def test_malformed_json_structure_is_a_usage_error(self):
+        import click
+
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        with pytest.raises(click.UsageError) as exc:
+            _parse_monitor_option_overrides(('thresholds={"critical": 1',))
+        assert "JSON" in str(exc.value)
+
+    def test_duplicate_key_last_wins(self):
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        parsed = _parse_monitor_option_overrides(
+            ("no_data_timeframe=30", "no_data_timeframe=60")
+        )
+        assert parsed == {"no_data_timeframe": 60}
+
+
+class TestNoDataTimeframeGuard:
+    """Tests for the notify_no_data / no_data_timeframe misconfiguration guard."""
+
+    def test_notify_no_data_without_timeframe_raises(self):
+        import click
+
+        from dd_cli.cli import _validate_no_data_options
+
+        with pytest.raises(click.UsageError) as exc:
+            _validate_no_data_options({"notify_no_data": True})
+        message = str(exc.value)
+        assert "no_data_timeframe" in message
+        assert "--no-data-timeframe" in message
+
+    def test_notify_no_data_with_timeframe_is_fine(self):
+        from dd_cli.cli import _validate_no_data_options
+
+        _validate_no_data_options({"notify_no_data": True, "no_data_timeframe": 60})
+
+    def test_notify_no_data_false_is_fine(self):
+        from dd_cli.cli import _validate_no_data_options
+
+        _validate_no_data_options({"notify_no_data": False})
+
+    def test_on_missing_data_supersedes_the_guard(self):
+        from dd_cli.cli import _validate_no_data_options
+
+        _validate_no_data_options(
+            {"notify_no_data": True, "on_missing_data": "show_and_notify_no_data"}
+        )
+
+    def test_guard_fires_via_create_monitor_cli(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            result = runner.invoke(
+                cli,
+                [
+                    "create-monitor",
+                    "--name",
+                    "dead man switch",
+                    "--type",
+                    "trace-analytics alert",
+                    "--query",
+                    'trace-analytics("service:x").rollup("count").last("45m") < 1',
+                    "--message",
+                    "silent",
+                    "--notify-no-data",
+                ],
+            )
+
+            assert result.exit_code != 0
+            assert "no_data_timeframe" in result.output
+            mock_client_class.assert_not_called()
+
+
+class TestCreateMonitorOptions:
+    """Tests for create-monitor option flags."""
+
+    @staticmethod
+    def _mock_client(mock_client_class):
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.create_monitor.return_value = {"id": 1}
+        mock_client_class.return_value = mock_client
+        return mock_client
+
+    BASE_ARGS = [
+        "create-monitor",
+        "--name",
+        "n",
+        "--type",
+        "query alert",
+        "--query",
+        "q",
+        "--message",
+        "m",
+    ]
+
+    def test_first_class_option_flags_are_sent(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class)
+
+            result = runner.invoke(
+                cli,
+                self.BASE_ARGS
+                + [
+                    "--notify-no-data",
+                    "--no-data-timeframe",
+                    "60",
+                    "--new-group-delay",
+                    "300",
+                    "--evaluation-delay",
+                    "120",
+                    "--notify-audit",
+                    "--no-include-tags",
+                    "--require-full-window",
+                    "--timeout-h",
+                    "4",
+                    "--renotify-interval",
+                    "60",
+                    "--renotify-occurrences",
+                    "3",
+                    "--renotify-status",
+                    "alert",
+                    "--renotify-status",
+                    "no data",
+                    "--escalation-message",
+                    "still down",
+                    "--group-retention-duration",
+                    "2d",
+                    "--notification-preset-name",
+                    "hide_query",
+                    "--critical",
+                    "1",
+                    "--warning",
+                    "2",
+                    "--critical-recovery",
+                    "0.5",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.create_monitor.call_args.kwargs["options"]
+            assert options == {
+                "notify_no_data": True,
+                "no_data_timeframe": 60,
+                "new_group_delay": 300,
+                "evaluation_delay": 120,
+                "notify_audit": True,
+                "include_tags": False,
+                "require_full_window": True,
+                "timeout_h": 4,
+                "renotify_interval": 60,
+                "renotify_occurrences": 3,
+                "renotify_statuses": ["alert", "no data"],
+                "escalation_message": "still down",
+                "group_retention_duration": "2d",
+                "notification_preset_name": "hide_query",
+                "thresholds": {
+                    "critical": 1.0,
+                    "warning": 2.0,
+                    "critical_recovery": 0.5,
+                },
+            }
+
+    def test_unset_flags_are_omitted(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class)
+
+            result = runner.invoke(cli, self.BASE_ARGS + ["--critical", "3"])
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.create_monitor.call_args.kwargs["options"]
+            assert options == {"thresholds": {"critical": 3.0}}
+
+    def test_on_missing_data_flag(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class)
+
+            result = runner.invoke(
+                cli, self.BASE_ARGS + ["--on-missing-data", "show_and_notify_no_data"]
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.create_monitor.call_args.kwargs["options"]
+            assert options == {"on_missing_data": "show_and_notify_no_data"}
+
+    def test_option_escape_hatch_merges(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class)
+
+            result = runner.invoke(
+                cli,
+                self.BASE_ARGS
+                + [
+                    "--option",
+                    "min_location_failed=2",
+                    "--option",
+                    'notify_by=["env"]',
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.create_monitor.call_args.kwargs["options"]
+            assert options == {"min_location_failed": 2, "notify_by": ["env"]}
+
+    def test_first_class_flag_beats_option_escape_hatch(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class)
+
+            result = runner.invoke(
+                cli,
+                self.BASE_ARGS
+                + [
+                    "--notify-no-data",
+                    "--no-data-timeframe",
+                    "60",
+                    "--option",
+                    "no_data_timeframe=5",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.create_monitor.call_args.kwargs["options"]
+            assert options["no_data_timeframe"] == 60
+
+    def test_option_escape_hatch_satisfies_the_guard(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class)
+
+            result = runner.invoke(
+                cli,
+                self.BASE_ARGS
+                + ["--notify-no-data", "--option", "no_data_timeframe=45"],
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.create_monitor.call_args.kwargs["options"]
+            assert options == {"notify_no_data": True, "no_data_timeframe": 45}
+
+
+class TestUpdateMonitorOptions:
+    """Tests for update-monitor parity + merge-not-clobber semantics."""
+
+    EXISTING = {
+        "id": 24864134,
+        "name": "dead man switch",
+        "options": {
+            "notify_no_data": True,
+            "no_data_timeframe": 60,
+            "renotify_interval": 60,
+            "notify_audit": False,
+            "include_tags": True,
+            "new_group_delay": 300,
+            "thresholds": {"critical": 1.0, "warning": 2.0},
+            "silenced": {},
+        },
+    }
+
+    @staticmethod
+    def _mock_client(mock_client_class, existing):
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get_monitor.return_value = existing
+        mock_client.update_monitor.return_value = {"id": existing["id"]}
+        mock_client_class.return_value = mock_client
+        return mock_client
+
+    def test_existing_options_survive_a_partial_update(self, runner, mock_env):
+        """A PUT with a partial options dict resets unspecified options DD-side,
+        so update-monitor must read-modify-write the full options object."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, self.EXISTING)
+
+            result = runner.invoke(
+                cli, ["update-monitor", "24864134", "--renotify-interval", "30"]
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.get_monitor.assert_called_once_with("24864134")
+            payload = mock_client.update_monitor.call_args.kwargs["payload"]
+            assert payload["options"] == {
+                "notify_no_data": True,
+                "no_data_timeframe": 60,
+                "renotify_interval": 30,
+                "notify_audit": False,
+                "include_tags": True,
+                "new_group_delay": 300,
+                "thresholds": {"critical": 1.0, "warning": 2.0},
+                "silenced": {},
+            }
+
+    def test_threshold_update_preserves_sibling_thresholds(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, self.EXISTING)
+
+            result = runner.invoke(
+                cli, ["update-monitor", "24864134", "--critical", "5"]
+            )
+
+            assert result.exit_code == 0, result.output
+            payload = mock_client.update_monitor.call_args.kwargs["payload"]
+            assert payload["options"]["thresholds"] == {
+                "critical": 5.0,
+                "warning": 2.0,
+            }
+
+    def test_updates_tags_and_priority(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, self.EXISTING)
+
+            result = runner.invoke(
+                cli,
+                [
+                    "update-monitor",
+                    "24864134",
+                    "--tag",
+                    "managed-by:dd-cli",
+                    "--tag",
+                    "team:platform",
+                    "--priority",
+                    "2",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            payload = mock_client.update_monitor.call_args.kwargs["payload"]
+            assert payload["tags"] == ["managed-by:dd-cli", "team:platform"]
+            assert payload["priority"] == 2
+
+    def test_sets_no_data_options(self, runner, mock_env):
+        existing = {"id": 5, "options": {"include_tags": True}}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, existing)
+
+            result = runner.invoke(
+                cli,
+                [
+                    "update-monitor",
+                    "5",
+                    "--notify-no-data",
+                    "--no-data-timeframe",
+                    "60",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            payload = mock_client.update_monitor.call_args.kwargs["payload"]
+            assert payload["options"] == {
+                "include_tags": True,
+                "notify_no_data": True,
+                "no_data_timeframe": 60,
+            }
+
+    def test_guard_uses_merged_options(self, runner, mock_env):
+        """Turning notify_no_data on for a monitor with no existing
+        no_data_timeframe must be refused."""
+        existing = {"id": 5, "options": {"include_tags": True}}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, existing)
+
+            result = runner.invoke(cli, ["update-monitor", "5", "--notify-no-data"])
+
+            assert result.exit_code != 0
+            assert "no_data_timeframe" in result.output
+            mock_client.update_monitor.assert_not_called()
+
+    def test_guard_passes_when_existing_options_supply_the_timeframe(
+        self, runner, mock_env
+    ):
+        existing = {"id": 5, "options": {"no_data_timeframe": 30}}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, existing)
+
+            result = runner.invoke(cli, ["update-monitor", "5", "--notify-no-data"])
+
+            assert result.exit_code == 0, result.output
+            payload = mock_client.update_monitor.call_args.kwargs["payload"]
+            assert payload["options"] == {
+                "no_data_timeframe": 30,
+                "notify_no_data": True,
+            }
+
+    def test_option_escape_hatch_on_update(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, self.EXISTING)
+
+            result = runner.invoke(
+                cli,
+                [
+                    "update-monitor",
+                    "24864134",
+                    "--option",
+                    "evaluation_delay=120",
+                    "--option",
+                    "new_group_delay=600",
+                    "--new-group-delay",
+                    "900",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            payload = mock_client.update_monitor.call_args.kwargs["payload"]
+            assert payload["options"]["evaluation_delay"] == 120
+            # First-class flag wins over --option.
+            assert payload["options"]["new_group_delay"] == 900
+
+    def test_no_updates_is_a_usage_error(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, self.EXISTING)
+
+            result = runner.invoke(cli, ["update-monitor", "24864134"])
+
+            assert result.exit_code != 0
+            mock_client.update_monitor.assert_not_called()
+
+    def test_options_untouched_when_only_name_changes(self, runner, mock_env):
+        """No option flags -> do not send an options dict at all (and do not
+        need to read the monitor first)."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = self._mock_client(mock_client_class, self.EXISTING)
+
+            result = runner.invoke(
+                cli, ["update-monitor", "24864134", "--name", "new name"]
+            )
+
+            assert result.exit_code == 0, result.output
+            payload = mock_client.update_monitor.call_args.kwargs["payload"]
+            assert payload == {"name": "new name"}
+            mock_client.get_monitor.assert_not_called()

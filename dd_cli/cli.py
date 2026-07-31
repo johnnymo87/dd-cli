@@ -1248,9 +1248,12 @@ def _monitor_summary(monitor: dict[str, Any]) -> dict[str, Any]:
 @click.option(
     "--max-results",
     type=int,
-    default=1000,
+    default=10000,
     show_default=True,
-    help="Stop fetching after this many results.",
+    help=(
+        "Stop fetching after this many results. Hitting the cap marks the "
+        "result truncated (exit 3), so keep it above the number you expect."
+    ),
 )
 @click.option(
     "--format",
@@ -1756,19 +1759,27 @@ def list_dashboards_cmd(
             d for d in dashboards if needle in str(d.get("title", "")).lower()
         ]
 
-    _output_dashboards(dashboards, output_format)
+    result = PagedResult(items=dashboards)
+    payload = _output_dashboards(result, output_format)
+    finish(result, payload, on_truncation="warn", describe="list-dashboards")
 
 
-def _output_dashboards(dashboards: list[dict[str, Any]], output_format: str) -> None:
+def _output_dashboards(
+    result: PagedResult, output_format: str
+) -> dict[str, Any] | None:
     """Output dashboards in the specified format."""
+    dashboards = result.items
     if output_format == "summary":
-        summary = [_dashboard_summary(d) for d in dashboards]
-        click.echo(json.dumps({"count": len(summary), "data": summary}, indent=2))
-    elif output_format == "json":
-        click.echo(json.dumps({"count": len(dashboards), "data": dashboards}, indent=2))
-    elif output_format == "jsonl":
-        for d in dashboards:
-            click.echo(json.dumps(d))
+        return success_envelope(
+            [_dashboard_summary(d) for d in dashboards], result=result
+        )
+    if output_format == "json":
+        return success_envelope(dashboards, result=result)
+
+    for d in dashboards:
+        click.echo(json.dumps(d))
+    warn(f"count={len(dashboards)} truncated={str(result.truncated).lower()}")
+    return None
 
 
 @cli.command("list-catalog-entities")
@@ -2785,9 +2796,22 @@ def list_slos_cmd(
 
     # Extract and format a summary table
     slos = data.get("data", [])
-    if not slos:
-        click.echo(json.dumps({"data": [], "count": 0}, indent=2))
-        return
+    if not isinstance(slos, list):
+        _handle_runtime_error(
+            RuntimeError(
+                "list-slos expected 'data' to be a JSON array, got "
+                f"{type(slos).__name__}"
+            )
+        )
+
+    # This endpoint is not auto-paginated: an explicit --limit that comes back
+    # exactly full may be page 1 of N, and offset paging cannot tell.
+    hit_limit = limit is not None and len(slos) >= limit
+    slo_result = PagedResult(
+        items=slos,
+        truncated=hit_limit,
+        truncation_reason=REASON_MAX_RESULTS_UNKNOWN if hit_limit else None,
+    )
 
     summary = []
     for slo in slos:
@@ -2805,7 +2829,12 @@ def list_slos_cmd(
             }
         )
 
-    click.echo(json.dumps({"data": summary, "count": len(summary)}, indent=2))
+    finish(
+        slo_result,
+        success_envelope(summary, result=slo_result),
+        on_truncation="warn",
+        describe="list-slos",
+    )
 
 
 @cli.command("get-slo")
@@ -2897,14 +2926,19 @@ _RELATIVE_TIME_RE = re.compile(r"now-(\d+)([smhdw])\Z")
 _TIME_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
-def _parse_relative_seconds(value: str) -> float:
-    """Resolve 'now', 'now-90s', 'now-2w', or epoch seconds to epoch seconds."""
+def _parse_relative_seconds(value: str, *, now: float | None = None) -> float:
+    """Resolve 'now', 'now-90s', 'now-2w', or epoch seconds to epoch seconds.
+
+    ``now`` may be pinned so that several relative values in one command are
+    resolved against the same instant.
+    """
     value = value.strip()
     if value.isdigit():
         return float(value)
 
+    now = time.time() if now is None else now
     if value == "now":
-        return time.time()
+        return now
 
     m = _RELATIVE_TIME_RE.fullmatch(value)
     if not m:
@@ -2914,7 +2948,7 @@ def _parse_relative_seconds(value: str) -> float:
             "'now-1h30m' are not supported -- they used to be silently "
             "truncated to the first unit."
         )
-    return time.time() - int(m.group(1)) * _TIME_MULTIPLIERS[m.group(2)]
+    return now - int(m.group(1)) * _TIME_MULTIPLIERS[m.group(2)]
 
 
 def _parse_time_to_epoch_s(value: str) -> int:
@@ -3328,8 +3362,11 @@ def count_logs_cmd(
       dd-cli count-logs 'service:web status:error' --from now-48h --bucket 1h
       dd-cli count-logs 'service:web' --from now-7d
     """
-    start = int(_parse_relative_seconds(time_from))
-    end = int(_parse_relative_seconds(time_to))
+    # Resolve "now" ONCE: parsing --from and --to separately lets them land on
+    # different seconds, which would shift a bucket edge.
+    now = time.time()
+    start = int(_parse_relative_seconds(time_from, now=now))
+    end = int(_parse_relative_seconds(time_to, now=now))
     if end <= start:
         raise click.UsageError(f"--to ({time_to}) must be after --from ({time_from}).")
 

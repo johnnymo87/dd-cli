@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import datetime
 import json
+import math
 import re
 import time
 from pathlib import Path
@@ -10,10 +12,12 @@ import click
 
 from .http import DatadogAPIError, DatadogClient, RetryEvent, env
 from .output import (
+    EXIT_TRUNCATED,
     REASON_MAX_PAGES,
     REASON_MAX_RESULTS_UNKNOWN,
     REASON_MORE_AVAILABLE,
     REASON_SERVER_TIMEOUT,
+    SCHEMA_VERSION,
     PagedResult,
     emit,
     failure_envelope,
@@ -3243,3 +3247,192 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ── count-logs ──────────────────────────────────────────────────────
+
+#: Guard against a typo turning into thousands of API calls (and, at Datadog's
+#: rate limits, an hour of retrying).
+_MAX_BUCKETS = 500
+
+
+def _parse_duration_seconds(value: str) -> int:
+    """Parse a bare duration like '1h', '15m', '2w' into seconds."""
+    m = re.fullmatch(r"(\d+)([smhdw])", value.strip())
+    if not m:
+        raise click.UsageError(
+            f"Invalid bucket duration: {value!r}. Use e.g. '15m', '1h', '1d'."
+        )
+    return int(m.group(1)) * _TIME_MULTIPLIERS[m.group(2)]
+
+
+@cli.command("count-logs")
+@click.argument("query", metavar="QUERY")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--from",
+    "time_from",
+    default="now-1h",
+    show_default=True,
+    help="Start time (e.g., now-48h)",
+)
+@click.option("--to", "time_to", default="now", show_default=True, help="End time")
+@click.option(
+    "--bucket",
+    default=None,
+    help="Bucket size (e.g., 1h). Omit for a single total over the whole range.",
+)
+@click.option(
+    "--storage-tier",
+    type=click.Choice(["indexes", "online-archives", "flex"]),
+    help="Storage tier to search",
+)
+@click.option(
+    "--allow-partial",
+    is_flag=True,
+    help="Continue past a failing bucket, marking its count null (never 0).",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Per-request timeout in seconds (increase for flex tier)",
+)
+def count_logs_cmd(
+    query: str,
+    site: str,
+    time_from: str,
+    time_to: str,
+    bucket: str | None,
+    storage_tier: str | None,
+    allow_partial: bool,
+    timeout: float,
+) -> None:
+    """Count logs, optionally bucketed over time.
+
+    Exists to remove the reason to write a shell loop. Incident-driven: an
+    agent looping over hours in bash gave every iteration an independent chance
+    to turn a 429 into a 0, and the resulting hourly series pointed at the
+    wrong conclusion. Bucketing in-process means a 429 is a retry and an
+    exhausted retry is an exception -- a bucket is never 0 unless it really is.
+
+    \b
+    Examples:
+      dd-cli count-logs 'service:web status:error' --from now-48h --bucket 1h
+      dd-cli count-logs 'service:web' --from now-7d
+    """
+    start = int(_parse_relative_seconds(time_from))
+    end = int(_parse_relative_seconds(time_to))
+    if end <= start:
+        raise click.UsageError(f"--to ({time_to}) must be after --from ({time_from}).")
+
+    if bucket:
+        width = _parse_duration_seconds(bucket)
+        if width > end - start:
+            raise click.UsageError(
+                f"--bucket {bucket} is larger than the {end - start}s range; "
+                "use a smaller bucket or a wider range."
+            )
+        n_buckets = math.ceil((end - start) / width)
+        if n_buckets > _MAX_BUCKETS:
+            raise click.UsageError(
+                f"too many buckets ({n_buckets} > {_MAX_BUCKETS}) for "
+                f"--bucket {bucket} over that range."
+            )
+        edges = [
+            (start + i * width, min(start + (i + 1) * width, end))
+            for i in range(n_buckets)
+        ]
+    else:
+        edges = [(start, end)]
+
+    buckets: list[dict[str, Any]] = []
+    failures = 0
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            for lo, hi in edges:
+                entry: dict[str, Any] = {
+                    "from": _iso(lo),
+                    "to": _iso(hi),
+                    "from_epoch_s": lo,
+                    "to_epoch_s": hi,
+                }
+                try:
+                    entry["count"] = dd.count_logs(
+                        query=query,
+                        time_from=str(lo * 1000),
+                        time_to=str(hi * 1000),
+                        storage_tier=storage_tier,
+                    )
+                    entry["complete"] = True
+                except (DatadogAPIError, RuntimeError) as e:
+                    if not allow_partial:
+                        raise
+                    failures += 1
+                    # null, never 0: this bucket made no observation.
+                    entry["count"] = None
+                    entry["complete"] = False
+                    entry["error"] = {
+                        "status": getattr(e, "status_code", None),
+                        "message": str(e),
+                    }
+                    warn(f"bucket {entry['from']}..{entry['to']} FAILED: {e}")
+                buckets.append(entry)
+    except (DatadogAPIError, RuntimeError) as e:
+        # Null out this command's own result fields too, so a caller reading
+        # .total gets null rather than a missing key it might coerce to 0.
+        raise _ApiFailure(
+            failure_envelope(
+                e,
+                status=getattr(e, "status_code", None),
+                attempts=getattr(e, "attempts", None),
+                elapsed_s=getattr(e, "elapsed_s", None),
+                extra={"total": None, "buckets": None, "partial_total": None},
+            ),
+            str(e),
+        ) from None
+
+    complete = failures == 0
+    counted = sum(b["count"] for b in buckets if b["count"] is not None)
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "schema_version": SCHEMA_VERSION,
+        "query": query,
+        "from": _iso(start),
+        "to": _iso(end),
+        # A total that silently omits failed buckets would understate reality,
+        # so it is null unless every bucket reported.
+        "total": counted if complete else None,
+        "truncated": not complete,
+        "truncation_reason": None if complete else "bucket_failed",
+        "buckets": buckets if bucket else None,
+    }
+    if not complete:
+        payload["partial_total"] = counted
+        payload["failed_buckets"] = failures
+
+    emit(payload)
+
+    if not complete:
+        warn(
+            f"{failures} of {len(buckets)} bucket(s) FAILED; 'total' is null and "
+            "'partial_total' excludes them. Do not treat partial_total as a total."
+        )
+        raise SystemExit(EXIT_TRUNCATED)
+
+
+def _iso(epoch_s: int) -> str:
+    return (
+        datetime.datetime.fromtimestamp(epoch_s, tz=datetime.UTC)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )

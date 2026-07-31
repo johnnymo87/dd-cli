@@ -81,6 +81,7 @@ def failure_envelope(
     attempts: int | None = None,
     elapsed_s: float | None = None,
     body: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the envelope printed on stdout when a command fails.
 
@@ -96,7 +97,7 @@ def failure_envelope(
         detail["elapsed_s"] = round(elapsed_s, 3)
     if body:
         detail["body"] = body
-    return {
+    payload: dict[str, Any] = {
         "ok": False,
         "schema_version": SCHEMA_VERSION,
         "data": None,
@@ -105,6 +106,9 @@ def failure_envelope(
         "truncation_reason": None,
         "error": detail,
     }
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 def success_envelope(

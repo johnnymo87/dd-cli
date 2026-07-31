@@ -451,6 +451,51 @@ class DatadogClient:
 
         return self._read("POST", "/api/v2/logs/events/search", json_body=body)
 
+    def count_logs(
+        self,
+        *,
+        query: str,
+        time_from: str,
+        time_to: str,
+        storage_tier: str | None = None,
+    ) -> int:
+        """Count matching logs via the aggregate endpoint.
+
+        Returns a real count or raises. An unexpected response shape raises
+        rather than returning 0: a zero is a claim that nothing matched, and
+        this method must never make that claim on the API's behalf.
+        """
+        body: dict[str, Any] = {
+            "compute": [{"aggregation": "count"}],
+            "filter": {"query": query, "from": time_from, "to": time_to},
+        }
+        if storage_tier:
+            body["filter"]["storage_tier"] = storage_tier
+
+        payload = self._read("POST", "/api/v2/logs/analytics/aggregate", json_body=body)
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"logs aggregate returned {type(payload).__name__}, expected an object"
+            )
+
+        buckets = (payload.get("data") or {}).get("buckets")
+        if buckets is None:
+            raise RuntimeError(
+                "logs aggregate response contained no 'data.buckets'; refusing to "
+                f"report a count. Response: {str(payload)[:200]}"
+            )
+        if not buckets:
+            # A genuinely empty result set: no bucket means nothing matched.
+            return 0
+
+        computes = buckets[0].get("computes") or {}
+        if "c0" not in computes:
+            raise RuntimeError(
+                "logs aggregate bucket had no 'c0' compute; refusing to report a "
+                f"count. Bucket: {str(buckets[0])[:200]}"
+            )
+        return int(computes["c0"])
+
     def validate(self) -> dict[str, Any]:
         """Validate the PAT via /api/v2/current_user.
 

@@ -2,18 +2,40 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn
 
 import click
 
-from .http import DatadogAPIError, DatadogClient, env
+from .http import DatadogAPIError, DatadogClient, RetryEvent, env
+from .output import (
+    REASON_MAX_PAGES,
+    REASON_MAX_RESULTS_UNKNOWN,
+    REASON_MORE_AVAILABLE,
+    REASON_SERVER_TIMEOUT,
+    PagedResult,
+    emit,
+    failure_envelope,
+    finish,
+    success_envelope,
+    warn,
+)
 
 
 def _default_site() -> str:
     return env("DD_SITE", "us3.datadoghq.com") or "us3.datadoghq.com"
 
 
-def _get_client(site: str, timeout: float = 15.0) -> DatadogClient:
+def _report_retry(event: RetryEvent) -> None:
+    """Make waiting visible instead of looking like a hang."""
+    warn(str(event))
+
+
+def _get_client(
+    site: str,
+    timeout: float = 15.0,
+    *,
+    max_retries: int | None = None,
+) -> DatadogClient:
     """Create a DatadogClient, raising UsageError if DD_PAT is not set.
 
     Authenticates with a Datadog Personal Access Token (``DD_PAT``, sent as a
@@ -23,16 +45,80 @@ def _get_client(site: str, timeout: float = 15.0) -> DatadogClient:
     if not pat:
         raise click.UsageError("DD_PAT (a Datadog Personal Access Token) must be set.")
 
-    return DatadogClient(site=site, pat=pat, timeout=timeout)
+    if max_retries is None:
+        raw = env("DD_MAX_RETRIES")
+        try:
+            max_retries = int(raw) if raw else 5
+        except ValueError as exc:
+            raise click.UsageError(
+                f"DD_MAX_RETRIES must be an integer, got {raw!r}"
+            ) from exc
 
-
-def _handle_api_error(e: DatadogAPIError) -> None:
-    """Convert DatadogAPIError to ClickException with JSON output."""
-    error_output = json.dumps(
-        {"error": str(e), "status": e.status_code, "body": e.response_body},
-        indent=2,
+    return DatadogClient(
+        site=site,
+        pat=pat,
+        timeout=timeout,
+        max_retries=max_retries,
+        on_retry=_report_retry,
     )
-    raise click.ClickException(error_output)
+
+
+class _ApiFailure(click.ClickException):
+    """Failure that still prints a parseable envelope on stdout.
+
+    Click's default behaviour writes only to stderr, leaving stdout empty --
+    and empty stdout is exactly how a 429 becomes a 0 in a caller's shell loop.
+    """
+
+    exit_code = 1
+
+    def __init__(self, payload: dict[str, Any], message: str) -> None:
+        super().__init__(message)
+        self.payload = payload
+
+    def show(self, file: Any = None) -> None:
+        emit(self.payload)
+        click.echo(f"dd-cli: {self.message}", err=True)
+
+
+def _handle_api_error(e: DatadogAPIError) -> NoReturn:
+    """Fail loudly, on stdout as well as stderr, never as an empty result."""
+    raise _ApiFailure(
+        failure_envelope(
+            e,
+            status=e.status_code,
+            attempts=e.attempts,
+            elapsed_s=e.elapsed_s,
+            body=e.response_body,
+        ),
+        str(e),
+    )
+
+
+def _handle_runtime_error(e: Exception) -> NoReturn:
+    raise _ApiFailure(failure_envelope(e), str(e))
+
+
+def truncation_option(f: Any) -> Any:
+    """Add ``--on-truncation`` to a command that can return a partial answer.
+
+    Deliberately *not* keyed on whether the user passed ``--max-results``
+    explicitly. Click can tell the difference, but an exported ``DD_MAX_RESULTS``
+    would then silently downgrade every truncation forever -- the exact silent
+    partial this exists to prevent. It is also the wrong question: an agent
+    reading ``count: 50`` cannot tell whether 50 is the answer or the ceiling,
+    and who typed the ceiling does not change that.
+    """
+    return click.option(
+        "--on-truncation",
+        type=click.Choice(["exit3", "warn", "error"]),
+        default="exit3",
+        show_default=True,
+        help=(
+            "What to do when the answer is incomplete: exit3 (warn + exit 3), "
+            "warn (warn + exit 0), or error (fail)."
+        ),
+    )(f)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -279,7 +365,14 @@ def validate_cmd(site: str) -> None:
     type=click.Choice(["indexes", "online-archives", "flex"]),
     help="Storage tier to search",
 )
-@click.option("--all-pages", is_flag=True, help="Fetch all pages (up to 50)")
+@click.option("--all-pages", is_flag=True, help="Fetch all pages (up to --max-pages)")
+@click.option(
+    "--max-pages",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Page cap for --all-pages. Hitting it marks the result truncated.",
+)
 @click.option(
     "--timeout",
     type=float,
@@ -301,6 +394,7 @@ def validate_cmd(site: str) -> None:
     show_default=True,
     help="Output format: json, jsonl (one per line), messages (message only)",
 )
+@truncation_option
 def search_logs_cmd(
     query: str,
     site: str,
@@ -309,63 +403,143 @@ def search_logs_cmd(
     limit: int,
     storage_tier: str | None,
     all_pages: bool,
+    max_pages: int,
     timeout: float,
     max_results: int | None,
     output_format: str,
+    on_truncation: str,
 ) -> None:
     """Search logs with Datadog query syntax.
 
     Example: dd-cli search-logs 'env:prod service:(svc1 OR svc2) order-123'
     """
-    max_pages = 50 if all_pages else 1
-    cursor: str | None = None
-    all_logs: list[dict[str, Any]] = []
+    page_cap = max_pages if all_pages else 1
 
     try:
         with _get_client(site, timeout=timeout) as dd:
-            for _ in range(max_pages):
-                data = dd.search_logs(
-                    query=query,
-                    time_from=time_from,
-                    time_to=time_to,
-                    limit=limit,
-                    cursor=cursor,
-                    storage_tier=storage_tier,
-                )
-
-                logs = data.get("data", [])
-                if isinstance(logs, list):
-                    all_logs.extend(logs)
-
-                # Check if we've hit max_results
-                if max_results and len(all_logs) >= max_results:
-                    all_logs = all_logs[:max_results]
-                    break
-
-                cursor = (data.get("meta") or {}).get("page", {}).get("after")
-                if not cursor:
-                    break
-
+            result = _paginate_logs(
+                dd,
+                query=query,
+                time_from=time_from,
+                time_to=time_to,
+                limit=limit,
+                storage_tier=storage_tier,
+                page_cap=page_cap,
+                max_results=max_results,
+            )
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
-    _output_logs(all_logs, output_format)
+    payload = _output_logs(result, output_format)
+    finish(result, payload, on_truncation=on_truncation, describe="search-logs")
 
 
-def _output_logs(logs: list[dict[str, Any]], output_format: str) -> None:
-    """Output logs in the specified format."""
+def _paginate_logs(
+    dd: DatadogClient,
+    *,
+    query: str,
+    time_from: str,
+    time_to: str,
+    limit: int,
+    storage_tier: str | None,
+    page_cap: int,
+    max_results: int | None,
+) -> PagedResult:
+    """Fetch log pages, tracking whether the answer ended up complete."""
+    cursor: str | None = None
+    logs: list[dict[str, Any]] = []
+    warnings: list[Any] = []
+    truncated = False
+    reason: str | None = None
+    pages = 0
+
+    for _ in range(page_cap):
+        data = dd.search_logs(
+            query=query,
+            time_from=time_from,
+            time_to=time_to,
+            limit=limit,
+            cursor=cursor,
+            storage_tier=storage_tier,
+        )
+        pages += 1
+
+        batch = data.get("data", [])
+        if not isinstance(batch, list):
+            # Never let an unexpected shape contribute 0 to a count.
+            raise RuntimeError(
+                "logs search expected 'data' to be a JSON array, got "
+                f"{type(batch).__name__}: {str(batch)[:200]}"
+            )
+        logs.extend(batch)
+
+        meta = data.get("meta") or {}
+
+        # HTTP 200 with a short body: a flex query that timed out server-side.
+        # No error to retry, no cap to detect -- only meta says so.
+        page_warnings = meta.get("warnings") or []
+        if page_warnings:
+            warnings.extend(page_warnings)
+        status = meta.get("status")
+        if (status is not None and status != "done") or page_warnings:
+            truncated = True
+            reason = REASON_SERVER_TIMEOUT
+
+        cursor = (meta.get("page") or {}).get("after")
+
+        if max_results is not None and len(logs) >= max_results:
+            if len(logs) > max_results or cursor:
+                truncated = True
+                reason = reason or REASON_MORE_AVAILABLE
+            logs = logs[:max_results]
+            cursor = cursor if cursor else None
+            break
+
+        if not cursor:
+            break
+    else:
+        # Loop ran to the page cap. A live cursor means a short answer.
+        if cursor:
+            truncated = True
+            reason = REASON_MAX_PAGES
+
+    return PagedResult(
+        items=logs,
+        truncated=truncated,
+        truncation_reason=reason,
+        pages_fetched=pages,
+        next_cursor=cursor,
+        warnings=warnings or None,
+    )
+
+
+def _output_logs(result: PagedResult, output_format: str) -> dict[str, Any] | None:
+    """Output logs in the specified format.
+
+    Only the ``json`` format can carry the truncation flag in-band. ``jsonl``
+    and ``messages`` signal out of band (stderr + exit code); injecting a
+    sentinel record would corrupt a jq pipeline.
+    """
+    logs = result.items
     if output_format == "json":
-        click.echo(json.dumps({"data": logs, "count": len(logs)}, indent=2))
-    elif output_format == "jsonl":
+        # Returned, not emitted: finish() prints it, so that --on-truncation
+        # error can mark the envelope ok:false rather than contradicting itself.
+        return success_envelope(logs, result=result)
+
+    if output_format == "jsonl":
         for log in logs:
             click.echo(json.dumps(log))
     elif output_format == "messages":
         for log in logs:
-            message = log.get("attributes", {}).get("message", "")
-            if message:
-                click.echo(message)
+            # Emit even an empty message: dropping it would make the line count
+            # disagree with the record count. (A message containing a newline
+            # already makes line-counting unsafe -- never count these lines.)
+            click.echo(log.get("attributes", {}).get("message", ""))
+
+    warn(f"count={len(logs)} truncated={str(result.truncated).lower()}")
+    return None
 
 
 @cli.command("create-log-metric")
@@ -1074,6 +1248,7 @@ def _monitor_summary(monitor: dict[str, Any]) -> dict[str, Any]:
     show_default=True,
     help="Request timeout in seconds",
 )
+@truncation_option
 def list_monitors_cmd(
     tags: tuple[str, ...],
     name: str | None,
@@ -1081,6 +1256,7 @@ def list_monitors_cmd(
     output_format: str,
     site: str,
     timeout: float,
+    on_truncation: str,
 ) -> None:
     """List monitors, optionally filtered by tag and/or name.
 
@@ -1101,6 +1277,9 @@ def list_monitors_cmd(
     page_size = 1000
     tag_list = list(tags) if tags else None
     monitors: list[dict[str, Any]] = []
+    truncated = False
+    reason: str | None = None
+    pages = 0
 
     try:
         with _get_client(site, timeout=timeout) as dd:
@@ -1113,8 +1292,14 @@ def list_monitors_cmd(
                     page_size=page_size,
                 )
                 monitors.extend(batch)
+                pages += 1
 
                 if len(monitors) >= max_results:
+                    # Page/offset paging cannot distinguish "exactly full" from
+                    # "more exists" without spending another request, so this
+                    # stays conservative and says so in the reason.
+                    truncated = True
+                    reason = REASON_MAX_RESULTS_UNKNOWN
                     monitors = monitors[:max_results]
                     break
 
@@ -1126,21 +1311,30 @@ def list_monitors_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
-    _output_monitors(monitors, output_format)
+    result = PagedResult(
+        items=monitors,
+        truncated=truncated,
+        truncation_reason=reason,
+        pages_fetched=pages,
+    )
+    payload = _output_monitors(result, output_format)
+    finish(result, payload, on_truncation=on_truncation, describe="list-monitors")
 
 
-def _output_monitors(monitors: list[dict[str, Any]], output_format: str) -> None:
+def _output_monitors(result: PagedResult, output_format: str) -> dict[str, Any] | None:
     """Output monitors in the specified format."""
+    monitors = result.items
     if output_format == "summary":
-        summary = [_monitor_summary(m) for m in monitors]
-        click.echo(json.dumps({"count": len(summary), "data": summary}, indent=2))
-    elif output_format == "json":
-        click.echo(json.dumps({"count": len(monitors), "data": monitors}, indent=2))
-    elif output_format == "jsonl":
-        for m in monitors:
-            click.echo(json.dumps(m))
+        return success_envelope([_monitor_summary(m) for m in monitors], result=result)
+    if output_format == "json":
+        return success_envelope(monitors, result=result)
+
+    for m in monitors:
+        click.echo(json.dumps(m))
+    warn(f"count={len(monitors)} truncated={str(result.truncated).lower()}")
+    return None
 
 
 @cli.command("create-dashboard")

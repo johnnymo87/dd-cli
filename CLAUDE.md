@@ -53,6 +53,7 @@ dd-cli get-incident 152 --enrich
 | --- | --- |
 | `dd-cli validate` | Validate API key |
 | `dd-cli search-logs QUERY` | Search logs with Datadog query syntax |
+| `dd-cli count-logs QUERY` | Count logs, optionally bucketed (`--bucket 1h`) in one invocation |
 | `dd-cli get-incident ID` | Get incident by ID (with optional `--enrich`) |
 | `dd-cli update-incident ID` | Update incident fields |
 | `dd-cli create-log-metric ID` | Create a log-based count metric (works with flex tier) |
@@ -102,7 +103,9 @@ PagerDuty API credentials, so `dd-cli` does not expose them yet.
 | `--to` | `now` | End time |
 | `--limit` | `100` | Max logs per page |
 | `--storage-tier` | - | Storage tier: `indexes`, `flex`, `online-archives` |
-| `--all-pages` | - | Fetch all pages (up to 50) |
+| `--all-pages` | - | Fetch all pages (up to `--max-pages`) |
+| `--max-pages` | `50` | Page cap; hitting it marks the result truncated |
+| `--on-truncation` | `exit3` | `exit3`, `warn`, or `error` when the answer is incomplete |
 | `--max-results` | - | Stop after N results (use with `--all-pages`) |
 | `--timeout` | `15` | Request timeout in seconds (increase for flex) |
 | `--format` | `json` | Output: `json`, `jsonl`, `messages` |
@@ -155,3 +158,54 @@ dd_cli/
 ```
 
 The `DatadogClient` class handles authentication, request/response, and error handling. CLI commands are thin wrappers that format output.
+
+## Output Contract: Errors Must Never Be Representable As Data
+
+**A failed request must never surface as `0`, `[]`, `null`, or a short page.**
+
+This is not a style preference. A Datadog 429 recorded as a count of 0 once led
+an analysis to conclude a failure population stopped 23 hours *before* the
+deploy that fixed it. The zero is not usually manufactured inside dd-cli -- it
+is manufactured at the process boundary:
+
+```bash
+n=$(dd-cli search-logs ... | jq '.count')   # on failure: empty stdin, jq prints nothing, exits 0
+total=$(( total + ${n:-0} ))                # <- the 0 is manufactured HERE
+```
+
+The pipeline's exit status is `jq`'s, not dd-cli's. So:
+
+1. **Every data-producing command emits a parseable envelope on stdout even
+   when it fails**, with `"ok": false` and `data`/`count` set to `null` (never
+   `[]` or `0` -- a zero is a claim about the world, and a failed request
+   observed nothing). Exit status is still non-zero.
+2. **Incompleteness is machine-detectable.** `--format json` always carries
+   `truncated` and `truncation_reason`. Stopping short exits **3**.
+   `--on-truncation=exit3|warn|error` overrides.
+3. **Never `except: pass` around a data-producing call.** Record the failure in
+   the output (see `enrichment.errors[]` / `partial`).
+4. **Never count lines of a text output format.** `jsonl` and `messages` cannot
+   carry the flag in-band; they signal via stderr and exit code. For
+   programmatic or agent consumption use `--format json`.
+5. **Prefer one invocation over a shell loop.** `count-logs --bucket 1h` exists
+   because per-iteration invocations each get their own chance to fail silently.
+
+The `truncated` boolean is deliberately conservative -- true whenever a cap bit.
+Page/offset paginators cannot distinguish "exactly full" from "more exists"
+without another request, so the precision lives in `truncation_reason`
+(`more_available`, `max_pages`, `max_results_boundary_unknown`,
+`server_timeout`), not in the boolean.
+
+### Reliability
+
+`http.py` retries 429/5xx with backoff, honoring `Retry-After` and
+`X-RateLimit-Reset`. Use `_read()` for reads and `_write()` for state-changing
+calls -- never call `_request()` directly. `_write` retries only a 429 carrying
+Datadog's rate-limit headers, and only once, because a bare 429 may come from an
+intermediary that emitted it after the origin already accepted the write.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `DD_MAX_RETRIES` | `5` | Retries after the initial attempt |
+| retry budget | `max(120, 4 x timeout)` | Total wall-clock ceiling for sleeps |
+| exit `3` | - | Command worked; the answer is incomplete |

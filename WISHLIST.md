@@ -18,11 +18,18 @@ Implemented in v0.3.0. Use `--format jsonl` or `--format messages`.
 
 ## Medium Priority
 
-### 2. Progress indicator for slow queries
+### 2. Progress indicator for slow queries -- partially addressed
 
 **Problem**: Flex tier queries can take 30-60+ seconds with no feedback.
 
 **Suggestion**: Add a spinner or progress dots to stderr.
+
+**Status**: The honest half landed with the retry work. Retries now announce
+themselves on stderr (`dd-cli: 429 from /api/v2/logs/events/search, retry 2/5
+in 4.0s`), so a long wait is legible rather than looking like a hang. The
+spinner itself is still open: it is cosmetic, and it would add a second kind of
+stderr traffic alongside the truncation/count warnings that are now part of the
+output contract. Worth doing deliberately, not as a side effect.
 
 ## Low Priority / Nice to Have
 

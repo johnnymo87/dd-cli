@@ -1,7 +1,7 @@
 """Tests for dd_cli."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -219,8 +219,13 @@ class TestListMonitors:
             assert output["count"] == 1050
 
     def test_list_monitors_default_max_results_caps_at_1000(self, runner, mock_env):
-        """Default --max-results=1000 caps after the first full page,
-        even if more pages exist on the API side."""
+        """Default --max-results=1000 caps after the first full page.
+
+        The default cap equals Datadog's max page_size, so an org with >=1000
+        monitors hits it on every default invocation and is told the answer is
+        incomplete. Loud-and-correct is the intended trade here: the previous
+        behaviour returned exactly 1000 and looked like a complete list.
+        """
         full_page = [self._full_monitor(i) for i in range(1000)]
         with patch("dd_cli.cli.DatadogClient") as mock_client_class:
             mock_client = MagicMock()
@@ -231,11 +236,12 @@ class TestListMonitors:
 
             result = runner.invoke(cli, ["list-monitors"])
 
-            assert result.exit_code == 0, result.output
+            assert result.exit_code == 3, result.output
             # Only one API call — we hit the cap and stopped.
             assert mock_client.list_monitors.call_count == 1
-            output = json.loads(result.output)
+            output = json.loads(result.stdout)
             assert output["count"] == 1000
+            assert output["truncated"] is True
 
     def test_list_monitors_max_results_truncates(self, runner, mock_env):
         """--max-results caps the total returned, even when more would fit
@@ -251,11 +257,14 @@ class TestListMonitors:
 
             result = runner.invoke(cli, ["list-monitors", "--max-results", "1500"])
 
-            assert result.exit_code == 0, result.output
+            # The cap bit, so the answer is incomplete and says so.
+            assert result.exit_code == 3, result.output
             # Both pages fetched (first was full, can't tell if more without asking)
             assert mock_client.list_monitors.call_count == 2
-            output = json.loads(result.output)
+            output = json.loads(result.stdout)
             assert output["count"] == 1500
+            assert output["truncated"] is True
+            assert output["truncation_reason"] == "max_results_boundary_unknown"
 
     def test_list_monitors_format_jsonl(self, runner, mock_env):
         """--format jsonl emits one full monitor per line, no wrapper."""
@@ -272,7 +281,8 @@ class TestListMonitors:
             result = runner.invoke(cli, ["list-monitors", "--format", "jsonl"])
 
             assert result.exit_code == 0, result.output
-            lines = result.output.strip().split("\n")
+            # stdout carries only records; the count trailer goes to stderr.
+            lines = result.stdout.strip().split("\n")
             assert len(lines) == 2
             m1 = json.loads(lines[0])
             m2 = json.loads(lines[1])
@@ -1027,13 +1037,16 @@ class TestSearchLogsMaxResults:
                 ["search-logs", "test query", "--all-pages", "--max-results", "50"],
             )
 
-            assert result.exit_code == 0
+            # A cursor was still outstanding, so the answer is incomplete.
+            assert result.exit_code == 3
             # Should only call search_logs once since first page has >= 50 results
             assert mock_client.search_logs.call_count == 1
 
-            output = json.loads(result.output)
+            output = json.loads(result.stdout)
             assert output["count"] == 50
             assert len(output["data"]) == 50
+            assert output["truncated"] is True
+            assert output["truncation_reason"] == "more_available"
 
     def test_max_results_fetches_multiple_pages_if_needed(self, runner, mock_env):
         """Verify --max-results fetches more pages when first page is insufficient."""
@@ -1064,12 +1077,13 @@ class TestSearchLogsMaxResults:
                 ["search-logs", "test query", "--all-pages", "--max-results", "120"],
             )
 
-            assert result.exit_code == 0
+            assert result.exit_code == 3
             # Should call search_logs 3 times to get 120 results
             assert mock_client.search_logs.call_count == 3
 
-            output = json.loads(result.output)
+            output = json.loads(result.stdout)
             assert output["count"] == 120
+            assert output["truncated"] is True
 
 
 class TestSearchLogsFormat:
@@ -1095,7 +1109,8 @@ class TestSearchLogsFormat:
             )
 
             assert result.exit_code == 0
-            lines = result.output.strip().split("\n")
+            # stdout carries only records; the count trailer goes to stderr.
+            lines = result.stdout.strip().split("\n")
             assert len(lines) == 2
 
             log1 = json.loads(lines[0])
@@ -1123,7 +1138,7 @@ class TestSearchLogsFormat:
             )
 
             assert result.exit_code == 0
-            lines = result.output.strip().split("\n")
+            lines = result.stdout.strip().split("\n")
             assert lines == ["First log message", "Second log message"]
 
     def test_default_format_is_json(self, runner, mock_env):
@@ -2190,7 +2205,11 @@ class TestGetClientCredentialSelection:
         ):
             _get_client("us3.datadoghq.com")
             mock_client_class.assert_called_once_with(
-                site="us3.datadoghq.com", pat="ddpat_x", timeout=15.0
+                site="us3.datadoghq.com",
+                pat="ddpat_x",
+                timeout=15.0,
+                max_retries=5,
+                on_retry=ANY,
             )
 
     def test_errors_when_pat_missing(self):

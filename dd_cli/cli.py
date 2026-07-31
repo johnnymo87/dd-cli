@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
@@ -163,13 +165,31 @@ def get_incident_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
 
 def _enrich_incident(dd: DatadogClient, data: dict[str, Any]) -> None:
-    """Add enrichment data to incident response (modifies data in place)."""
+    """Add enrichment data to incident response (modifies data in place).
+
+    Enrichment is optional, so a failure here does not fail the command -- but
+    it is recorded rather than swallowed. A silently missing ``enrichment`` key
+    is indistinguishable from an incident that genuinely has no incident type,
+    which is the same error-as-absence trap this codebase is closing elsewhere.
+    """
+    enrichment = data.setdefault("enrichment", {})
+    errors: list[dict[str, Any]] = []
+
+    def record(step: str, exc: Exception) -> None:
+        errors.append(
+            {
+                "step": step,
+                "status": getattr(exc, "status_code", None),
+                "message": str(exc),
+            }
+        )
+
     try:
         incident_type_uuid = (
             data.get("data", {}).get("attributes", {}).get("incident_type_uuid")
@@ -177,21 +197,27 @@ def _enrich_incident(dd: DatadogClient, data: dict[str, Any]) -> None:
 
         if incident_type_uuid:
             try:
-                type_data = dd.get_incident_type(incident_type_uuid)
-                data.setdefault("enrichment", {})["incident_type"] = type_data
-            except DatadogAPIError:
-                pass  # Don't fail if type lookup fails
+                enrichment["incident_type"] = dd.get_incident_type(incident_type_uuid)
+            except (DatadogAPIError, RuntimeError) as e:
+                record("incident_type", e)
 
-        try:
-            incident_id = data.get("data", {}).get("id", "")
-            if incident_id:
-                integrations_data = dd.get_incident_integrations(incident_id)
-                data.setdefault("enrichment", {})["integrations"] = integrations_data
-        except DatadogAPIError:
-            pass  # Don't fail if integrations lookup fails
+        incident_id = data.get("data", {}).get("id", "")
+        if incident_id:
+            try:
+                enrichment["integrations"] = dd.get_incident_integrations(incident_id)
+            except (DatadogAPIError, RuntimeError) as e:
+                record("integrations", e)
 
-    except Exception as e:
-        data.setdefault("enrichment", {})["errors"] = f"Enrichment failed: {e}"
+    except Exception as e:  # pragma: no cover - defensive
+        record("enrichment", e)
+
+    enrichment["partial"] = bool(errors)
+    if errors:
+        enrichment["errors"] = errors
+        warn(
+            f"incident enrichment is INCOMPLETE: "
+            f"{', '.join(e['step'] for e in errors)} failed"
+        )
 
 
 @cli.command("update-incident")
@@ -244,7 +270,7 @@ def update_incident_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -331,7 +357,7 @@ def validate_cmd(site: str) -> None:
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps({"status": 200, **data}, indent=2))
 
@@ -596,7 +622,7 @@ def create_log_metric_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -1117,7 +1143,7 @@ def create_monitor_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -1165,7 +1191,7 @@ def get_monitor_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -1436,7 +1462,7 @@ def create_dashboard_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     dashboard_id = data.get("id")
     click.echo(
@@ -1526,7 +1552,7 @@ def get_dashboard_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -1643,7 +1669,7 @@ def update_dashboard_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(
         json.dumps(
@@ -1717,7 +1743,7 @@ def list_dashboards_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     dashboards = data.get("dashboards", [])
     if name:
@@ -1769,6 +1795,7 @@ def _output_dashboards(dashboards: list[dict[str, Any]], output_format: str) -> 
 )
 @click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
 @click.option("--timeout", type=float, default=15.0, show_default=True)
+@truncation_option
 def list_catalog_entities_cmd(
     kind: str | None,
     owner: str | None,
@@ -1780,12 +1807,14 @@ def list_catalog_entities_cmd(
     output_format: str,
     site: str,
     timeout: float,
+    on_truncation: str,
 ) -> None:
     """List Software Catalog entities."""
     page_size = 100
     entities: list[dict[str, Any]] = []
     included: list[dict[str, Any]] = []
     include_list = list(includes) if includes else None
+    truncated = False
 
     try:
         with _get_client(site, timeout=timeout) as dd:
@@ -1810,6 +1839,9 @@ def list_catalog_entities_cmd(
                 included.extend(page.get("included", []))
 
                 if len(entities) >= max_results:
+                    # Offset paging: hitting the cap cannot be distinguished
+                    # from landing exactly on the end without another request.
+                    truncated = True
                     entities = entities[:max_results]
                     break
                 if len(batch) < limit:
@@ -1818,9 +1850,17 @@ def list_catalog_entities_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
-    _output_catalog_entities(entities, included, output_format)
+    result = PagedResult(
+        items=entities,
+        truncated=truncated,
+        truncation_reason=REASON_MAX_RESULTS_UNKNOWN if truncated else None,
+    )
+    payload = _output_catalog_entities(result, included, output_format)
+    finish(
+        result, payload, on_truncation=on_truncation, describe="list-catalog-entities"
+    )
 
 
 @cli.command("get-catalog-entity")
@@ -1874,7 +1914,7 @@ def get_catalog_entity_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     entities = page.get("data", [])
     if not entities:
@@ -1928,7 +1968,7 @@ def get_catalog_oncall_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     entities = page.get("data", [])
     if not entities:
@@ -1958,24 +1998,25 @@ def get_catalog_oncall_cmd(
 
 
 def _output_catalog_entities(
-    entities: list[dict[str, Any]],
+    result: PagedResult,
     included: list[dict[str, Any]],
     output_format: str,
-) -> None:
+) -> dict[str, Any] | None:
+    entities = result.items
     if output_format == "jsonl":
         for entity in entities:
             click.echo(json.dumps(entity))
-        return
+        warn(f"count={len(entities)} truncated={str(result.truncated).lower()}")
+        return None
 
     if output_format == "summary":
-        data = [_catalog_entity_summary(entity) for entity in entities]
-        click.echo(json.dumps({"count": len(data), "data": data}, indent=2))
-        return
+        return success_envelope(
+            [_catalog_entity_summary(entity) for entity in entities], result=result
+        )
 
-    output: dict[str, Any] = {"count": len(entities), "data": entities}
-    if included:
-        output["included"] = included
-    click.echo(json.dumps(output, indent=2))
+    return success_envelope(
+        entities, result=result, extra={"included": included} if included else None
+    )
 
 
 def _catalog_entity_summary(entity: dict[str, Any]) -> dict[str, Any]:
@@ -2327,6 +2368,7 @@ def list_catalog_pagerduty_links_cmd(
 )
 @click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
 @click.option("--timeout", type=float, default=15.0, show_default=True)
+@truncation_option
 def list_teams_cmd(
     query: str | None,
     me: bool,
@@ -2337,6 +2379,7 @@ def list_teams_cmd(
     output_format: str,
     site: str,
     timeout: float,
+    on_truncation: str,
 ) -> None:
     """List Datadog Teams, optionally filtered by search keyword.
 
@@ -2360,9 +2403,10 @@ def list_teams_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
-    _output_teams(teams, output_format)
+    payload = _output_teams(teams, output_format)
+    finish(teams, payload, on_truncation=on_truncation, describe="teams")
 
 
 @cli.command("find-user-teams")
@@ -2377,12 +2421,14 @@ def list_teams_cmd(
 )
 @click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
 @click.option("--timeout", type=float, default=15.0, show_default=True)
+@truncation_option
 def find_user_teams_cmd(
     member: str,
     max_results: int,
     output_format: str,
     site: str,
     timeout: float,
+    on_truncation: str,
 ) -> None:
     """Find Datadog Teams matching a user/member email or name.
 
@@ -2405,9 +2451,10 @@ def find_user_teams_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
-    _output_teams(teams, output_format)
+    payload = _output_teams(teams, output_format)
+    finish(teams, payload, on_truncation=on_truncation, describe="teams")
 
 
 @cli.command("list-team-notification-rules")
@@ -2435,7 +2482,7 @@ def list_team_notification_rules_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     rules = data.get("data", [])
     if output_format == "json":
@@ -2459,9 +2506,19 @@ def _resolve_team_by_handle(dd: DatadogClient, handle: str) -> dict[str, Any]:
         max_results=1000,
     )
     matches = [
-        team for team in teams if (team.get("attributes") or {}).get("handle") == handle
+        team
+        for team in teams.items
+        if (team.get("attributes") or {}).get("handle") == handle
     ]
     if not matches:
+        if teams.truncated:
+            # "Not found" within a truncated search is not an answer.
+            raise click.ClickException(
+                f"No Datadog team with handle {handle} was found, but the team "
+                f"list was TRUNCATED at {len(teams.items)} results "
+                f"({teams.truncation_reason}), so this is not a reliable "
+                "'does not exist'. Narrow the search or raise --max-results."
+            )
         raise click.ClickException(f"No Datadog team found with handle {handle}")
     if len(matches) > 1:
         raise click.ClickException(f"Multiple Datadog teams matched handle {handle}")
@@ -2491,47 +2548,68 @@ def _fetch_teams(
     fields: list[str] | None,
     sort: str | None,
     max_results: int,
-) -> list[dict[str, Any]]:
-    page_size = 100
+) -> PagedResult:
+    # The page size MUST stay constant. Page-number pagination with a varying
+    # page size addresses a moving window: at max_results=150 the old code
+    # fetched page 0 @ size 100 (items 0-99), then shrank the limit to 50 and
+    # fetched page 1 @ size 50 -- which is items 50-99 AGAIN. The caller got 50
+    # duplicates and never saw items 100-149.
+    # Chosen ONCE and then held constant for the whole sequence.
+    page_size = min(100, max_results)
     teams: list[dict[str, Any]] = []
     page_number = 0
+    truncated = False
+    pages = 0
 
     while len(teams) < max_results:
-        limit = min(page_size, max_results - len(teams))
-        if limit <= 0:
-            break
-
         page = dd.list_teams(
             keyword=keyword,
             me=me,
             include=include,
             fields=fields,
             page_number=page_number,
-            page_size=limit,
+            page_size=page_size,
             sort=sort,
         )
+        pages += 1
         batch = page.get("data", [])
+        if not isinstance(batch, list):
+            raise RuntimeError(
+                "teams list expected 'data' to be a JSON array, got "
+                f"{type(batch).__name__}"
+            )
         teams.extend(batch)
 
-        if len(batch) < limit:
+        if len(batch) < page_size:
             break
         page_number += 1
+    else:
+        truncated = True
 
-    return teams[:max_results]
+    if len(teams) > max_results:
+        truncated = True
+        teams = teams[:max_results]
+
+    return PagedResult(
+        items=teams,
+        truncated=truncated,
+        truncation_reason=REASON_MAX_RESULTS_UNKNOWN if truncated else None,
+        pages_fetched=pages,
+    )
 
 
-def _output_teams(teams: list[dict[str, Any]], output_format: str) -> None:
+def _output_teams(result: PagedResult, output_format: str) -> dict[str, Any] | None:
+    teams = result.items
     if output_format == "jsonl":
         for team in teams:
             click.echo(json.dumps(team))
-        return
+        warn(f"count={len(teams)} truncated={str(result.truncated).lower()}")
+        return None
 
     if output_format == "json":
-        click.echo(json.dumps({"count": len(teams), "data": teams}, indent=2))
-        return
+        return success_envelope(teams, result=result)
 
-    data = [_team_summary(team) for team in teams]
-    click.echo(json.dumps({"count": len(data), "data": data}, indent=2))
+    return success_envelope([_team_summary(team) for team in teams], result=result)
 
 
 def _team_summary(team: dict[str, Any]) -> dict[str, Any]:
@@ -2655,7 +2733,7 @@ def update_monitor_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -2699,7 +2777,7 @@ def list_slos_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     # Extract and format a summary table
     slos = data.get("data", [])
@@ -2784,35 +2862,60 @@ def get_slo_cmd(
             try:
                 history_data = dd.get_slo_history(slo_id, from_ts=from_ts, to_ts=to_ts)
                 slo_data["history"] = history_data
-            except DatadogAPIError:
-                slo_data["history"] = {"error": "Failed to fetch SLO history"}
+                slo_data["partial"] = False
+            except DatadogAPIError as history_error:
+                # Record WHY, and mark the document partial: a history block
+                # holding only an error string still reads as a valid SLO.
+                slo_data["history"] = {
+                    "error": {
+                        "status": history_error.status_code,
+                        "message": str(history_error),
+                        "attempts": history_error.attempts,
+                    }
+                }
+                slo_data["partial"] = True
+                warn(f"SLO history unavailable ({history_error}); result is partial")
 
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(slo_data, indent=2))
 
 
-def _parse_time_to_epoch_s(value: str) -> int:
-    """Convert a relative time string (now-1h, now-7d) or epoch seconds to int."""
-    import re
-    import time
+#: Anchored on purpose. The previous unanchored pattern let re.match() accept a
+#: prefix and silently discard the rest, so "now-1h30m" meant 1h and "now-7days"
+#: meant 7d -- a wrong time window, hence a confidently wrong count, with no
+#: API failure anywhere to hint that anything went wrong.
+_RELATIVE_TIME_RE = re.compile(r"now-(\d+)([smhdw])\Z")
 
+_TIME_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def _parse_relative_seconds(value: str) -> float:
+    """Resolve 'now', 'now-90s', 'now-2w', or epoch seconds to epoch seconds."""
+    value = value.strip()
     if value.isdigit():
-        return int(value)
+        return float(value)
 
-    m = re.match(r"now-(\d+)([mhd])", value)
+    if value == "now":
+        return time.time()
+
+    m = _RELATIVE_TIME_RE.fullmatch(value)
     if not m:
         raise click.UsageError(
-            f"Invalid time format: {value}. Use 'now-1h', 'now-7d', or epoch seconds."
+            f"Invalid time format: {value!r}. Use 'now', 'now-1h', 'now-7d' "
+            "(units s/m/h/d/w), or epoch seconds. Compound durations like "
+            "'now-1h30m' are not supported -- they used to be silently "
+            "truncated to the first unit."
         )
-    amount = int(m.group(1))
-    unit = m.group(2)
-    multipliers = {"m": 60, "h": 3600, "d": 86400}
-    offset_s = amount * multipliers[unit]
-    return int(time.time() - offset_s)
+    return time.time() - int(m.group(1)) * _TIME_MULTIPLIERS[m.group(2)]
+
+
+def _parse_time_to_epoch_s(value: str) -> int:
+    """Convert a relative time string (now-1h, now-7d) or epoch seconds to int."""
+    return int(_parse_relative_seconds(value))
 
 
 @cli.command("get-workflow")
@@ -2863,7 +2966,7 @@ def get_workflow_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -2894,22 +2997,10 @@ def _parse_workflow_ref(ref: str) -> tuple[str, str | None]:
 
 def _parse_time_to_epoch_ms(value: str) -> int:
     """Convert a relative time string (now-1h, now-7d) or epoch ms to int."""
-    import re
-    import time
-
-    if value.isdigit():
-        return int(value)
-
-    m = re.match(r"now-(\d+)([mhd])", value)
-    if not m:
-        raise click.UsageError(
-            f"Invalid time format: {value}. Use 'now-1h', 'now-7d', or epoch ms."
-        )
-    amount = int(m.group(1))
-    unit = m.group(2)
-    multipliers = {"m": 60, "h": 3600, "d": 86400}
-    offset_s = amount * multipliers[unit]
-    return int((time.time() - offset_s) * 1000)
+    if value.strip().isdigit():
+        # Already epoch milliseconds.
+        return int(value.strip())
+    return int(_parse_relative_seconds(value) * 1000)
 
 
 @cli.command("search-et-issues")
@@ -2990,9 +3081,20 @@ def search_et_issues_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
+    # This endpoint is called once and exposes no cursor here, so what comes
+    # back is page 1 of N. Say so rather than letting it read as a total.
+    data["complete"] = False
+    data["completeness_note"] = (
+        "search-et-issues returns a single unpaginated page; the number of "
+        "issues shown is not necessarily the total number of matches."
+    )
     click.echo(json.dumps(data, indent=2))
+    warn(
+        "search-et-issues returned a single page; this is not a complete "
+        "count of matching issues."
+    )
 
 
 @cli.command("get-et-issue")
@@ -3042,7 +3144,7 @@ def get_et_issue_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -3092,7 +3194,7 @@ def update_et_issue_state_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
 
@@ -3125,7 +3227,7 @@ def check_pagerduty_service_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     output_data = data
     if isinstance(data, dict):

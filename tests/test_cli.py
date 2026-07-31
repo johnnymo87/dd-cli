@@ -398,8 +398,10 @@ class TestListCatalogEntities:
                 mock_client.list_catalog_entities.call_args_list[1].kwargs["offset"]
                 == 100
             )
-            output = json.loads(result.output)
+            output = json.loads(result.stdout)
             assert output["count"] == 101
+            # A short final page means the list really did end here.
+            assert output["truncated"] is False
 
     def test_list_catalog_entities_summary_handles_null_fields(self, runner, mock_env):
         with patch("dd_cli.cli.DatadogClient") as mock_client_class:
@@ -442,7 +444,9 @@ class TestListCatalogEntities:
                 cli, ["list-catalog-entities", "--max-results", "101"]
             )
 
-            assert result.exit_code == 0, result.output
+            # The cap bit exactly, which offset paging cannot distinguish from
+            # "the list ended here" -- so it reports incomplete.
+            assert result.exit_code == 3, result.output
             assert mock_client.list_catalog_entities.call_count == 2
             assert (
                 mock_client.list_catalog_entities.call_args_list[0].kwargs["limit"]
@@ -451,8 +455,10 @@ class TestListCatalogEntities:
             assert (
                 mock_client.list_catalog_entities.call_args_list[1].kwargs["limit"] == 1
             )
-            output = json.loads(result.output)
+            output = json.loads(result.stdout)
             assert output["count"] == 101
+            # The --max-results cap bit, so the answer admits it is incomplete.
+            assert output["truncated"] is True
 
     def test_list_catalog_entities_format_jsonl(self, runner, mock_env):
         with patch("dd_cli.cli.DatadogClient") as mock_client_class:
@@ -470,7 +476,7 @@ class TestListCatalogEntities:
             result = runner.invoke(cli, ["list-catalog-entities", "--format", "jsonl"])
 
             assert result.exit_code == 0, result.output
-            lines = result.output.strip().split("\n")
+            lines = result.stdout.strip().split("\n")
             assert len(lines) == 2
             assert json.loads(lines[0])["attributes"]["name"] == "svc-1"
             assert json.loads(lines[1])["attributes"]["name"] == "svc-2"
@@ -684,8 +690,10 @@ class TestListTeams:
             result = runner.invoke(cli, ["list-teams"])
 
             assert result.exit_code == 0, result.output
-            output = json.loads(result.output)
-            assert output == {
+            output = json.loads(result.stdout)
+            assert output["ok"] is True
+            assert output["truncated"] is False
+            assert {"count": output["count"], "data": output["data"]} == {
                 "count": 2,
                 "data": [
                     {
@@ -752,8 +760,10 @@ class TestListTeams:
             assert mock_client.list_teams.call_count == 2
             assert mock_client.list_teams.call_args_list[0].kwargs["page_number"] == 0
             assert mock_client.list_teams.call_args_list[1].kwargs["page_number"] == 1
-            output = json.loads(result.output)
+            output = json.loads(result.stdout)
             assert output["count"] == 101
+            # A short final page means the list really did end here.
+            assert output["truncated"] is False
 
     def test_list_teams_format_jsonl(self, runner, mock_env):
         with patch("dd_cli.cli.DatadogClient") as mock_client_class:
@@ -768,7 +778,7 @@ class TestListTeams:
             result = runner.invoke(cli, ["list-teams", "--format", "jsonl"])
 
             assert result.exit_code == 0, result.output
-            lines = result.output.strip().split("\n")
+            lines = result.stdout.strip().split("\n")
             assert len(lines) == 2
             assert json.loads(lines[0])["id"] == "abc"
             assert json.loads(lines[1])["id"] == "def"

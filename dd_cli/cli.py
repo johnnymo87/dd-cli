@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import click
 
@@ -568,10 +568,8 @@ def monitor_option_flags(f: Any) -> Any:
             "--renotify-status",
             "renotify_status",
             multiple=True,
-            help=(
-                "Status that triggers re-notification (repeatable): "
-                "alert, warn, no data"
-            ),
+            type=click.Choice(["alert", "warn", "no data"]),
+            help="Status that triggers re-notification (repeatable)",
         ),
         click.option(
             "--escalation-message",
@@ -604,6 +602,24 @@ def monitor_option_flags(f: Any) -> Any:
     return f
 
 
+# Bare values that are almost certainly a typo rather than data. Python
+# spellings of the JSON literals would otherwise be kept as strings, which is
+# how `--option notify_no_data=True` could sneak past the no-data guard as the
+# string "True"; NaN/Infinity are accepted by json.loads but are not valid
+# JSON on the wire.
+_LITERAL_LOOKALIKE_VALUES = frozenset(
+    {"true", "false", "null", "none", "nan", "infinity", "-infinity"}
+)
+_JSON_LITERAL_VALUES = frozenset({"true", "false", "null"})
+
+
+def _reject_json_constant(name: str) -> Any:
+    raise click.UsageError(
+        f"Malformed --option value: {name} is not valid JSON and cannot be "
+        "sent to Datadog."
+    )
+
+
 def _parse_monitor_option_overrides(pairs: tuple[str, ...]) -> dict[str, Any]:
     """Parse repeated ``--option KEY=VALUE`` pairs into an options dict.
 
@@ -612,6 +628,10 @@ def _parse_monitor_option_overrides(pairs: tuple[str, ...]) -> dict[str, Any]:
     ``--option on_missing_data=resolve`` does the obvious thing), *unless* it
     starts with a JSON structural character, in which case malformed JSON is a
     hard error rather than a silently-stringified typo.
+
+    Bare values that only *look* like literals (Python's ``True``/``None``,
+    or ``NaN``/``Infinity``) are rejected outright: silently shipping the
+    string ``"True"`` as ``notify_no_data`` would defeat the no-data guard.
     """
     parsed: dict[str, Any] = {}
     for pair in pairs:
@@ -626,9 +646,21 @@ def _parse_monitor_option_overrides(pairs: tuple[str, ...]) -> dict[str, Any]:
             raise click.UsageError(
                 f"Malformed --option {pair!r}: the key must not be empty."
             )
+        stripped = raw_value.strip()
+        if (
+            stripped.lower() in _LITERAL_LOOKALIKE_VALUES
+            and stripped not in _JSON_LITERAL_VALUES
+        ):
+            raise click.UsageError(
+                f"Malformed --option {pair!r}: {raw_value!r} is not valid JSON. "
+                "Use lowercase true/false/null (JSON spelling, not Python's), "
+                "and note that NaN/Infinity cannot be sent to Datadog. "
+                "If you really mean the literal string, quote it as JSON: "
+                f"--option '{key}=\"{raw_value}\"'"
+            )
         looks_like_json = raw_value[:1] in {"{", "[", '"'}
         try:
-            parsed[key] = json.loads(raw_value)
+            parsed[key] = json.loads(raw_value, parse_constant=_reject_json_constant)
         except json.JSONDecodeError:
             if looks_like_json:
                 raise click.UsageError(
@@ -640,16 +672,29 @@ def _parse_monitor_option_overrides(pairs: tuple[str, ...]) -> dict[str, Any]:
     return parsed
 
 
-def _build_monitor_options(monitor_opts: dict[str, Any]) -> dict[str, Any]:
+class MonitorOptionUpdates(NamedTuple):
+    """Caller-specified monitor options, plus how to apply them.
+
+    `replace_keys` holds the option keys the caller supplied as a whole object
+    (today: `thresholds` via `--option`), which must replace rather than merge
+    into the monitor's existing value -- otherwise there is no way to *remove*
+    a threshold.
+    """
+
+    options: dict[str, Any]
+    replace_keys: frozenset[str]
+
+
+def _build_monitor_options(monitor_opts: dict[str, Any]) -> MonitorOptionUpdates:
     """Assemble the `options` dict from the shared monitor option flags.
 
     Only options the caller actually specified are included; unset flags are
     omitted entirely so the caller never clobbers a Datadog default (or, on
     update, an existing value) by accident.
     """
-    options: dict[str, Any] = _parse_monitor_option_overrides(
-        monitor_opts.get("option") or ()
-    )
+    overrides = _parse_monitor_option_overrides(monitor_opts.get("option") or ())
+    options: dict[str, Any] = dict(overrides)
+    replace_keys = frozenset(overrides) & {"thresholds"}
 
     for dest, key in _MONITOR_SIMPLE_OPTION_FLAGS.items():
         value = monitor_opts.get(dest)
@@ -671,7 +716,7 @@ def _build_monitor_options(monitor_opts: dict[str, Any]) -> dict[str, Any]:
         merged.update(thresholds)
         options["thresholds"] = merged
 
-    return options
+    return MonitorOptionUpdates(options, replace_keys)
 
 
 def _existing_monitor_options(dd: DatadogClient, monitor_id: str) -> dict[str, Any]:
@@ -682,7 +727,8 @@ def _existing_monitor_options(dd: DatadogClient, monitor_id: str) -> dict[str, A
 
 
 def _merge_monitor_options(
-    existing: dict[str, Any], updates: dict[str, Any]
+    existing: dict[str, Any],
+    updates: MonitorOptionUpdates,
 ) -> dict[str, Any]:
     """Merge caller-specified options onto a monitor's existing options.
 
@@ -690,54 +736,121 @@ def _merge_monitor_options(
     rather than merging into it, so sending only the changed keys silently
     resets everything else (thresholds, no_data_timeframe, evaluation_delay
     ...). Merging here keeps the update PATCH-shaped from the caller's point
-    of view. `thresholds` is merged one level deeper for the same reason.
+    of view. `thresholds` is merged one level deeper for the same reason --
+    unless the caller passed the whole object via `--option thresholds=...`,
+    which replaces (the only way to remove a threshold).
     """
     merged = dict(existing)
-    merged.update(updates)
+    merged.update(updates.options)
 
-    if "thresholds" in updates:
+    if "thresholds" in updates.options and "thresholds" not in updates.replace_keys:
         prior = existing.get("thresholds")
         base = dict(prior) if isinstance(prior, dict) else {}
-        base.update(updates["thresholds"])
+        base.update(updates.options["thresholds"])
         merged["thresholds"] = base
 
+    return _drop_conflicting_no_data_family(merged, updates.options)
+
+
+# Datadog rejects on_missing_data combined with either legacy no-data option
+# (verified against POST /api/v1/monitor/validate):
+#   "The notify_no_data option is deprecated and cannot be used in
+#    combination with the on_missing_data option."
+#   "The no_data_timeframe option is deprecated and cannot be used in
+#    combination with the on_missing_data option"
+# notify_no_data=false alongside on_missing_data IS accepted.
+_LEGACY_NO_DATA_KEYS = ("notify_no_data", "no_data_timeframe")
+_NO_DATA_KEYS = frozenset({*_LEGACY_NO_DATA_KEYS, "on_missing_data"})
+
+
+def _uses_legacy_no_data(options: dict[str, Any]) -> bool:
+    """True if these options use the legacy no-data family in a way Datadog
+    will not accept next to on_missing_data."""
+    return (
+        options.get("notify_no_data") is True
+        or options.get("no_data_timeframe") is not None
+    )
+
+
+def _drop_conflicting_no_data_family(
+    merged: dict[str, Any], updates: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep a read-modify-write update from producing a payload Datadog 400s.
+
+    Merging the caller's no-data settings onto a monitor configured with the
+    *other* no-data mechanism would send both families at once. Whichever
+    family the caller just asked for wins; the other is dropped from the
+    merged options.
+    """
+    if updates.get("on_missing_data") is not None:
+        for key in _LEGACY_NO_DATA_KEYS:
+            merged.pop(key, None)
+    elif _uses_legacy_no_data(updates):
+        merged.pop("on_missing_data", None)
     return merged
 
 
-def _validate_no_data_options(options: dict[str, Any]) -> None:
-    """Refuse a monitor whose no-data alerting can never fire.
-
-    `notify_no_data: true` without `no_data_timeframe` is the classic silent
-    dead-man-switch bug: Datadog has no window over which to decide that data
-    is missing, so the no-data alert never fires and the monitor that exists
-    to catch silence is itself silently dead.
-    """
-    if options.get("notify_no_data") is not True:
-        return
-    if options.get("on_missing_data"):
-        # on_missing_data supersedes notify_no_data / no_data_timeframe.
-        return
-    if options.get("no_data_timeframe") is not None:
+def _validate_no_data_family_exclusivity(options: dict[str, Any]) -> None:
+    """Refuse a payload that Datadog would reject as self-contradictory."""
+    if options.get("on_missing_data") is None or not _uses_legacy_no_data(options):
         return
 
     raise click.UsageError(
-        "Refusing to write a monitor with notify_no_data=true and no "
-        "no_data_timeframe.\n"
+        "on_missing_data cannot be combined with notify_no_data=true or "
+        "no_data_timeframe -- Datadog rejects that payload:\n"
+        '  "The notify_no_data option is deprecated and cannot be used in '
+        'combination with the on_missing_data option."\n'
         "\n"
-        "Why this is a real bug, not a nit: no_data_timeframe is the window "
-        "Datadog uses to decide that data has stopped arriving. Without it the "
-        "no-data alert cannot fire, so a 'no signal' / dead-man-switch monitor "
-        "is itself silently dead -- exactly the failure mode it exists to "
-        "catch. This matters most for count-style queries (e.g. "
-        'trace-analytics(...).rollup("count") < 1): when the group goes '
-        "completely silent the monitor evaluates to No Data, NOT to 0, so the "
-        "'< 1' threshold never triggers either. Both halves are needed.\n"
-        "\n"
-        "Fix: add --no-data-timeframe N (minutes; use at least 2x the query's "
-        "evaluation window), or use --on-missing-data "
-        "show_and_notify_no_data on monitor types that support it, or drop "
-        "--notify-no-data."
+        "Pick one mechanism: --on-missing-data show_and_notify_no_data (the "
+        "modern one, supported by APM/trace-analytics, log, RUM and CI "
+        "monitors), or --notify-no-data --no-data-timeframe N (the legacy "
+        "pair, for metric/query alerts and service checks)."
     )
+
+
+_NO_DATA_TIMEFRAME_ADVICE = (
+    "notify_no_data=true with no no_data_timeframe.\n"
+    "\n"
+    "Why this matters: no_data_timeframe is the window Datadog uses to decide "
+    "that data has stopped arriving. Datadog nominally falls back to a default "
+    "(2x the evaluation window for query alerts, 24h for service checks), but "
+    "that implicit default has been observed NOT to page on a silent "
+    "trace-analytics group -- a 'no signal' / dead-man-switch monitor that is "
+    "itself silently dead, which is exactly the failure mode it exists to "
+    "catch. The threshold does not save you either: for count-style queries "
+    '(e.g. trace-analytics(...).rollup("count") < 1) a fully silent group '
+    "evaluates to No Data, NOT to 0, so '< 1' never triggers. Set the window "
+    "explicitly.\n"
+    "\n"
+    "Fix: add --no-data-timeframe N (minutes; use at least 2x the query's "
+    "evaluation window), or use --on-missing-data show_and_notify_no_data on "
+    "monitor types that support it, or drop --notify-no-data."
+)
+
+
+def _no_data_config_is_broken(options: dict[str, Any]) -> bool:
+    """True if these options ask for no-data alerting that cannot be trusted
+    to fire: notify_no_data without an explicit no_data_timeframe."""
+    if options.get("notify_no_data") is not True:
+        return False
+    if options.get("on_missing_data") is not None:
+        # on_missing_data supersedes the legacy pair (and is mutually
+        # exclusive with it -- see _validate_no_data_family_exclusivity).
+        return False
+    return options.get("no_data_timeframe") is None
+
+
+def _validate_no_data_options(options: dict[str, Any]) -> None:
+    """Refuse a monitor whose no-data alerting cannot be trusted to fire.
+
+    `notify_no_data: true` without `no_data_timeframe` is the classic silent
+    dead-man-switch bug: the monitor that exists to catch silence is itself
+    silently dead.
+    """
+    if not _no_data_config_is_broken(options):
+        return
+
+    raise click.UsageError(_NO_DATA_TIMEFRAME_ADVICE)
 
 
 @cli.command("create-monitor")
@@ -812,7 +925,8 @@ def create_monitor_cmd(
             --message 'scanner silent @slack-alerts' \\
             --notify-no-data --no-data-timeframe 60 --new-group-delay 300
     """  # noqa: E501
-    options = _build_monitor_options(monitor_opts)
+    options = _build_monitor_options(monitor_opts).options
+    _validate_no_data_family_exclusivity(options)
     _validate_no_data_options(options)
 
     try:
@@ -2288,6 +2402,12 @@ def update_monitor_cmd(
     changes applied on top. Precedence: first-class flags > --option
     KEY=VALUE > the monitor's existing options.
 
+    That read-modify-write is not atomic (the Datadog monitor API has no
+    ETag/If-Match), so an option changed by someone else between the GET and
+    the PUT is overwritten. Use --option KEY=null to clear an option, and
+    --option 'thresholds={...}' to replace the threshold object wholesale
+    (--critical/--warning only patch individual thresholds).
+
     \b
     Examples:
         dd-cli update-monitor 16440468 \\
@@ -2311,19 +2431,31 @@ def update_monitor_cmd(
     if priority is not None:
         payload["priority"] = priority
 
-    new_options = _build_monitor_options(monitor_opts)
+    updates = _build_monitor_options(monitor_opts)
 
-    if not payload and not new_options:
+    if not payload and not updates.options:
         raise click.UsageError(
             "No updates specified. Use --help to see available options."
         )
 
+    _validate_no_data_family_exclusivity(updates.options)
+
     try:
         with _get_client(site, timeout=timeout) as dd:
-            if new_options:
+            if updates.options:
                 existing_options = _existing_monitor_options(dd, monitor_id)
-                merged = _merge_monitor_options(existing_options, new_options)
-                _validate_no_data_options(merged)
+                merged = _merge_monitor_options(existing_options, updates)
+                if _NO_DATA_KEYS & updates.options.keys():
+                    # The caller is touching no-data config: hold them to it.
+                    _validate_no_data_options(merged)
+                elif _no_data_config_is_broken(merged):
+                    # Pre-existing breakage the caller did not ask about.
+                    # Warn loudly, but do not block an unrelated update.
+                    click.echo(
+                        f"WARNING: monitor {monitor_id} already has "
+                        f"{_NO_DATA_TIMEFRAME_ADVICE}",
+                        err=True,
+                    )
                 payload["options"] = merged
             data = dd.update_monitor(monitor_id, payload=payload)
     except DatadogAPIError as e:

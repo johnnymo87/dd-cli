@@ -163,12 +163,49 @@ dd-cli create-monitor ... \
 
 ### The no-data guard
 
-dd-cli refuses `notify_no_data: true` without `no_data_timeframe`
-(unless `on_missing_data` is set, which supersedes both). Without a
-timeframe Datadog has no window over which to declare data missing, so
-the no-data alert never fires -- a dead-man switch that is itself
-silently dead. Fix with `--no-data-timeframe N` or
-`--on-missing-data show_and_notify_no_data`.
+dd-cli refuses `notify_no_data: true` without an explicit
+`no_data_timeframe`. Datadog nominally defaults the timeframe (2x the
+evaluation window; 24h for service checks), but that implicit default has
+been observed *not* to page on a silent trace-analytics group -- a
+dead-man switch that is itself silently dead. Fix with
+`--no-data-timeframe N` or `--on-missing-data show_and_notify_no_data`.
+
+On `update-monitor` the guard only fires when you actually touch a no-data
+option (`--notify-no-data`, `--no-data-timeframe`, `--on-missing-data`).
+If the monitor is already in that broken state and you are changing
+something unrelated, dd-cli warns on stderr and proceeds.
+
+### The two no-data mechanisms are mutually exclusive
+
+Verified against `POST /api/v1/monitor/validate` (non-mutating):
+
+```
+notify_no_data + no_data_timeframe              -> OK  (legacy pair)
+on_missing_data                                 -> OK  (modern)
+on_missing_data + notify_no_data:true           -> 400
+on_missing_data + no_data_timeframe             -> 400
+on_missing_data + notify_no_data:false          -> OK
+```
+
+> "The notify_no_data option is deprecated and cannot be used in
+> combination with the on_missing_data option."
+
+dd-cli refuses that combination up front, and on update it drops the
+*other* family from the merged options so a read-modify-write cannot
+produce a payload Datadog rejects: ask for `--on-missing-data` and the
+legacy keys are removed; ask for the legacy pair and `on_missing_data` is
+removed.
+
+### Other update-monitor semantics
+
+- `--critical` / `--warning` patch individual thresholds; pass
+  `--option 'thresholds={"critical": 5}'` to replace the whole object
+  (the only way to *remove* a threshold).
+- `--option KEY=null` clears an option.
+- The read-modify-write GET->PUT is not atomic (no ETag on the monitor
+  API): a concurrent edit between the two calls is overwritten.
+- `--option` rejects Python-flavoured literals (`True`, `None`) and
+  `NaN`/`Infinity` rather than shipping them as strings.
 
 ## Update a Monitor
 

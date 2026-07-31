@@ -2698,3 +2698,257 @@ class TestUpdateMonitorOptions:
             payload = mock_client.update_monitor.call_args.kwargs["payload"]
             assert payload == {"name": "new name"}
             mock_client.get_monitor.assert_not_called()
+
+
+class TestNoDataFamilyExclusivity:
+    """Datadog rejects on_missing_data combined with the legacy
+    notify_no_data / no_data_timeframe options (verified against
+    POST /api/v1/monitor/validate):
+
+        "The notify_no_data option is deprecated and cannot be used in
+         combination with the on_missing_data option."
+        "The no_data_timeframe option is deprecated and cannot be used in
+         combination with the on_missing_data option"
+
+    notify_no_data=false alongside on_missing_data IS accepted.
+    """
+
+    BASE_ARGS = TestCreateMonitorOptions.BASE_ARGS
+
+    def test_create_refuses_both_families(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            result = runner.invoke(
+                cli,
+                self.BASE_ARGS
+                + ["--notify-no-data", "--no-data-timeframe", "60"]
+                + ["--on-missing-data", "show_and_notify_no_data"],
+            )
+
+            assert result.exit_code != 0
+            assert "on_missing_data" in result.output
+            mock_client_class.assert_not_called()
+
+    def test_create_refuses_timeframe_with_on_missing_data(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            result = runner.invoke(
+                cli,
+                self.BASE_ARGS
+                + ["--no-data-timeframe", "60", "--on-missing-data", "resolve"],
+            )
+
+            assert result.exit_code != 0
+            mock_client_class.assert_not_called()
+
+    def test_create_allows_notify_no_data_false_with_on_missing_data(
+        self, runner, mock_env
+    ):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = TestCreateMonitorOptions._mock_client(mock_client_class)
+
+            result = runner.invoke(
+                cli,
+                self.BASE_ARGS
+                + ["--no-notify-no-data", "--on-missing-data", "resolve"],
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.create_monitor.call_args.kwargs["options"]
+            assert options == {"notify_no_data": False, "on_missing_data": "resolve"}
+
+    def test_update_to_legacy_family_drops_on_missing_data(self, runner, mock_env):
+        existing = {
+            "id": 5,
+            "options": {"on_missing_data": "show_no_data", "include_tags": True},
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = TestUpdateMonitorOptions._mock_client(
+                mock_client_class, existing
+            )
+
+            result = runner.invoke(
+                cli,
+                [
+                    "update-monitor",
+                    "5",
+                    "--notify-no-data",
+                    "--no-data-timeframe",
+                    "60",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.update_monitor.call_args.kwargs["payload"]["options"]
+            assert "on_missing_data" not in options
+            assert options == {
+                "include_tags": True,
+                "notify_no_data": True,
+                "no_data_timeframe": 60,
+            }
+
+    def test_update_to_on_missing_data_drops_legacy_keys(self, runner, mock_env):
+        existing = {
+            "id": 5,
+            "options": {
+                "notify_no_data": True,
+                "no_data_timeframe": 60,
+                "include_tags": True,
+            },
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = TestUpdateMonitorOptions._mock_client(
+                mock_client_class, existing
+            )
+
+            result = runner.invoke(
+                cli,
+                ["update-monitor", "5", "--on-missing-data", "show_and_notify_no_data"],
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.update_monitor.call_args.kwargs["payload"]["options"]
+            assert options == {
+                "include_tags": True,
+                "on_missing_data": "show_and_notify_no_data",
+            }
+
+
+class TestNoDataGuardScope:
+    """The guard must not block updates that do not touch no-data options."""
+
+    def test_unrelated_update_warns_but_succeeds(self, runner, mock_env):
+        existing = {"id": 5, "options": {"notify_no_data": True, "include_tags": True}}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = TestUpdateMonitorOptions._mock_client(
+                mock_client_class, existing
+            )
+
+            result = runner.invoke(
+                cli, ["update-monitor", "5", "--renotify-interval", "30"]
+            )
+
+            assert result.exit_code == 0, result.output
+            assert "no_data_timeframe" in result.output
+            options = mock_client.update_monitor.call_args.kwargs["payload"]["options"]
+            # Pre-existing (broken) state is preserved, not silently "fixed".
+            assert options["notify_no_data"] is True
+            assert "no_data_timeframe" not in options
+
+    def test_touching_the_family_still_refuses(self, runner, mock_env):
+        existing = {"id": 5, "options": {"notify_no_data": True}}
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = TestUpdateMonitorOptions._mock_client(
+                mock_client_class, existing
+            )
+
+            result = runner.invoke(cli, ["update-monitor", "5", "--notify-no-data"])
+
+            assert result.exit_code != 0
+            mock_client.update_monitor.assert_not_called()
+
+
+class TestOptionParserHardening:
+    """Values that look like Python literals or non-finite numbers are typos,
+    not data: they must fail loudly rather than reach Datadog."""
+
+    @pytest.mark.parametrize(
+        "pair",
+        [
+            "notify_no_data=True",
+            "notify_no_data=False",
+            "notify_by=None",
+            "no_data_timeframe=NaN",
+            "no_data_timeframe=Infinity",
+            "no_data_timeframe=-Infinity",
+        ],
+    )
+    def test_pythonish_and_nonfinite_values_rejected(self, pair):
+        import click
+
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        with pytest.raises(click.UsageError):
+            _parse_monitor_option_overrides((pair,))
+
+    def test_lowercase_json_literals_still_work(self):
+        from dd_cli.cli import _parse_monitor_option_overrides
+
+        assert _parse_monitor_option_overrides(
+            ("notify_audit=true", "notify_by=null", "include_tags=false")
+        ) == {"notify_audit": True, "notify_by": None, "include_tags": False}
+
+    def test_pythonish_typo_cannot_bypass_the_no_data_guard(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            result = runner.invoke(
+                cli,
+                TestCreateMonitorOptions.BASE_ARGS
+                + ["--option", "notify_no_data=True"],
+            )
+
+            assert result.exit_code != 0
+            mock_client_class.assert_not_called()
+
+
+class TestThresholdsReplaceSemantics:
+    """--critical/--warning patch individual thresholds; an explicit
+    --option thresholds={...} replaces the whole object (the only way to
+    remove a threshold)."""
+
+    EXISTING = {
+        "id": 5,
+        "options": {"thresholds": {"critical": 1.0, "warning": 2.0}},
+    }
+
+    def test_option_thresholds_replaces_wholesale(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = TestUpdateMonitorOptions._mock_client(
+                mock_client_class, self.EXISTING
+            )
+
+            result = runner.invoke(
+                cli,
+                ["update-monitor", "5", "--option", 'thresholds={"critical": 5}'],
+            )
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.update_monitor.call_args.kwargs["payload"]["options"]
+            assert options["thresholds"] == {"critical": 5}
+
+    def test_threshold_flags_still_patch(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = TestUpdateMonitorOptions._mock_client(
+                mock_client_class, self.EXISTING
+            )
+
+            result = runner.invoke(cli, ["update-monitor", "5", "--critical", "9"])
+
+            assert result.exit_code == 0, result.output
+            options = mock_client.update_monitor.call_args.kwargs["payload"]["options"]
+            assert options["thresholds"] == {"critical": 9.0, "warning": 2.0}
+
+
+class TestMonitorOptionFlagCoverage:
+    """Every flag the shared decorator adds must actually be turned into an
+    option -- a flag added to the decorator but not to the mapping tables
+    would be silently ignored."""
+
+    def test_every_decorated_flag_is_handled(self):
+        import click
+
+        from dd_cli.cli import (
+            _MONITOR_SIMPLE_OPTION_FLAGS,
+            _MONITOR_THRESHOLD_FLAGS,
+            monitor_option_flags,
+        )
+
+        @click.command()
+        @monitor_option_flags
+        def probe(**kwargs):  # pragma: no cover - never invoked
+            pass
+
+        dests = {p.name for p in probe.params}
+        handled = (
+            set(_MONITOR_SIMPLE_OPTION_FLAGS)
+            | set(_MONITOR_THRESHOLD_FLAGS)
+            | {"renotify_status", "option"}
+        )
+        assert dests == handled

@@ -218,30 +218,34 @@ class TestListMonitors:
             output = json.loads(result.output)
             assert output["count"] == 1050
 
-    def test_list_monitors_default_max_results_caps_at_1000(self, runner, mock_env):
-        """Default --max-results=1000 caps after the first full page.
+    def test_list_monitors_default_keeps_paginating_past_one_full_page(
+        self, runner, mock_env
+    ):
+        """A full first page must not be mistaken for the whole list.
 
-        The default cap equals Datadog's max page_size, so an org with >=1000
-        monitors hits it on every default invocation and is told the answer is
-        incomplete. Loud-and-correct is the intended trade here: the previous
-        behaviour returned exactly 1000 and looked like a complete list.
+        The old default cap (1000) equalled Datadog's max page_size, so a full
+        first page both ended the fetch AND looked complete. The default is now
+        well above the page size, so a full page just means "fetch the next one".
         """
         full_page = [self._full_monitor(i) for i in range(1000)]
         with patch("dd_cli.cli.DatadogClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.list_monitors.side_effect = [full_page]
+            mock_client.list_monitors.side_effect = [
+                full_page,
+                [self._full_monitor(1000)],
+            ]
             mock_client_class.return_value = mock_client
 
             result = runner.invoke(cli, ["list-monitors"])
 
-            assert result.exit_code == 3, result.output
-            # Only one API call — we hit the cap and stopped.
-            assert mock_client.list_monitors.call_count == 1
+            assert result.exit_code == 0, result.output
+            # A full page is not the end: it fetched the next one and found it short.
+            assert mock_client.list_monitors.call_count == 2
             output = json.loads(result.stdout)
-            assert output["count"] == 1000
-            assert output["truncated"] is True
+            assert output["count"] == 1001
+            assert output["truncated"] is False
 
     def test_list_monitors_max_results_truncates(self, runner, mock_env):
         """--max-results caps the total returned, even when more would fit
@@ -2086,7 +2090,8 @@ class TestListDashboards:
             result = runner.invoke(cli, ["list-dashboards", "--format", "jsonl"])
 
             assert result.exit_code == 0, result.output
-            lines = [ln for ln in result.output.splitlines() if ln.strip()]
+            # stdout carries only records; the count trailer goes to stderr.
+            lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
             assert len(lines) == 1
             assert json.loads(lines[0])["description"] == "desc"
 

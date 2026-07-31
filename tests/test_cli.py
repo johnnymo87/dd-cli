@@ -1155,12 +1155,12 @@ class TestCatalogClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
-            dd._request = MagicMock(return_value={"data": []})
+            dd._read = MagicMock(return_value={"data": []})
 
             result = dd.list_catalog_entities()
 
             assert result == {"data": []}
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v2/catalog/entity",
                 params={
@@ -1180,12 +1180,12 @@ class TestTeamsClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
-            dd._request = MagicMock(return_value={"data": []})
+            dd._read = MagicMock(return_value={"data": []})
 
             result = dd.list_teams()
 
             assert result == {"data": []}
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v2/team",
                 params={
@@ -1201,7 +1201,7 @@ class TestTeamsClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
-            dd._request = MagicMock(return_value={"data": []})
+            dd._read = MagicMock(return_value={"data": []})
 
             result = dd.list_teams(
                 keyword="user@example.com",
@@ -1214,7 +1214,7 @@ class TestTeamsClient:
             )
 
             assert result == {"data": []}
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v2/team",
                 params={
@@ -1235,7 +1235,7 @@ class TestTeamsClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
-            dd._request = MagicMock(return_value={"data": []})
+            dd._read = MagicMock(return_value={"data": []})
 
             result = dd.list_team_memberships(
                 "team-123",
@@ -1246,7 +1246,7 @@ class TestTeamsClient:
             )
 
             assert result == {"data": []}
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v2/team/team-123/memberships",
                 params={
@@ -1264,12 +1264,12 @@ class TestTeamsClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
-            dd._request = MagicMock(return_value={"data": []})
+            dd._read = MagicMock(return_value={"data": []})
 
             result = dd.list_team_notification_rules("team-123")
 
             assert result == {"data": []}
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v2/team/team-123/notification-rules",
             )
@@ -1281,7 +1281,7 @@ class TestTeamsClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
-            dd._request = MagicMock(return_value={"data": []})
+            dd._read = MagicMock(return_value={"data": []})
 
             result = dd.list_catalog_entities(
                 kind="service",
@@ -1295,7 +1295,7 @@ class TestTeamsClient:
             )
 
             assert result == {"data": []}
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v2/catalog/entity",
                 params={
@@ -1575,12 +1575,12 @@ class TestPagerDutyClient:
                 "service_name": "datadog-routing-hub",
                 "service_key": "abcd1234abcd1234abcd1234abcd1234",
             }
-            dd._request = MagicMock(return_value=expected_response)
+            dd._read = MagicMock(return_value=expected_response)
 
             result = dd.get_pagerduty_integration_service("datadog-routing-hub")
 
             assert result == expected_response
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v1/integration/pagerduty/configuration/services/datadog-routing-hub",
             )
@@ -1596,12 +1596,12 @@ class TestPagerDutyClient:
                 "service_name": "datadog routing hub",
                 "service_key": "abcd1234abcd1234abcd1234abcd1234",
             }
-            dd._request = MagicMock(return_value=expected_response)
+            dd._read = MagicMock(return_value=expected_response)
 
             result = dd.get_pagerduty_integration_service("datadog routing hub")
 
             assert result == expected_response
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v1/integration/pagerduty/configuration/services/datadog%20routing%20hub",
             )
@@ -2075,12 +2075,12 @@ class TestDashboardClient:
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
             body = {"title": "t", "layout_type": "ordered", "widgets": []}
-            dd._request = MagicMock(return_value={"id": "abc"})
+            dd._write = MagicMock(return_value={"id": "abc"})
 
             result = dd.create_dashboard(body=body)
 
             assert result == {"id": "abc"}
-            dd._request.assert_called_once_with(
+            dd._write.assert_called_once_with(
                 "POST", "/api/v1/dashboard", json_body=body
             )
         finally:
@@ -2096,12 +2096,12 @@ class TestDashboardClient:
                 "layout_type": "ordered",
                 "widgets": [{"definition": {"type": "note", "content": "hi"}}],
             }
-            dd._request = MagicMock(return_value={"id": "abc"})
+            dd._write = MagicMock(return_value={"id": "abc"})
 
             result = dd.update_dashboard("abc", body=body)
 
             assert result == {"id": "abc"}
-            dd._request.assert_called_once_with(
+            dd._write.assert_called_once_with(
                 "PUT", "/api/v1/dashboard/abc", json_body=body
             )
         finally:
@@ -2112,12 +2112,12 @@ class TestDashboardClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
-            dd._request = MagicMock(return_value={"id": "abc"})
+            dd._read = MagicMock(return_value={"id": "abc"})
 
             result = dd.get_dashboard("abc")
 
             assert result == {"id": "abc"}
-            dd._request.assert_called_once_with("GET", "/api/v1/dashboard/abc")
+            dd._read.assert_called_once_with("GET", "/api/v1/dashboard/abc")
         finally:
             dd.close()
 
@@ -2126,12 +2126,12 @@ class TestDashboardClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_test")
         try:
-            dd._request = MagicMock(return_value={"dashboards": []})
+            dd._read = MagicMock(return_value={"dashboards": []})
 
             result = dd.list_dashboards()
 
             assert result == {"dashboards": []}
-            dd._request.assert_called_once_with("GET", "/api/v1/dashboard", params=None)
+            dd._read.assert_called_once_with("GET", "/api/v1/dashboard", params=None)
         finally:
             dd.close()
 
@@ -2167,9 +2167,9 @@ class TestAuthHeaders:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
         try:
-            dd._request = MagicMock(return_value={"data": {}})
+            dd._read = MagicMock(return_value={"data": {}})
             dd.validate()
-            dd._request.assert_called_once_with("GET", "/api/v2/current_user")
+            dd._read.assert_called_once_with("GET", "/api/v2/current_user")
         finally:
             dd.close()
 

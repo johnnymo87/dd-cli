@@ -1,12 +1,38 @@
 from __future__ import annotations
 
+import email.utils
 import json
 import os
+import random
+import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+# Status codes worth retrying for a read. 429 is handled separately because
+# its retry rules differ between reads and writes.
+RETRYABLE_SERVER_ERRORS = frozenset({500, 502, 503, 504})
+
+# Datadog's genuine rate-limit responses carry these. A bare 429 with none of
+# them is more likely to have come from an intermediary (edge/WAF/proxy), which
+# may have emitted it *after* the origin already accepted a write.
+_DD_RATELIMIT_HEADERS = (
+    "x-ratelimit-reset",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-period",
+    "x-ratelimit-name",
+)
+
+# A write may be retried on 429, but only barely: each extra attempt is another
+# chance to duplicate a create if the limiter sat in front of a server that had
+# already accepted the request.
+_WRITE_MAX_RETRIES = 1
 
 
 def _normalize_site(site: str) -> str:
@@ -34,14 +60,43 @@ def env(var: str, default: str | None = None) -> str | None:
 
 @dataclass
 class DatadogAPIError(Exception):
-    """Exception for Datadog API errors."""
+    """Exception for Datadog API errors.
+
+    ``attempts`` and ``elapsed_s`` record how hard the client tried before
+    giving up, so an exhausted retry loop is legible after the fact rather
+    than looking like a single unlucky request.
+    """
 
     status_code: int
     message: str
     response_body: str | None = None
+    attempts: int = 1
+    elapsed_s: float = 0.0
 
     def __str__(self) -> str:
-        return f"{self.message} (status={self.status_code})"
+        base = f"{self.message} (status={self.status_code})"
+        if self.attempts > 1:
+            base += f" after {self.attempts} attempts over {self.elapsed_s:.1f}s"
+        return base
+
+
+@dataclass
+class RetryEvent:
+    """Reported to the ``on_retry`` callback before each retry sleep."""
+
+    status: int | None
+    path: str
+    attempt: int
+    max_retries: int
+    delay: float
+    reason: str
+
+    def __str__(self) -> str:
+        what = self.status if self.status is not None else self.reason
+        return (
+            f"{what} from {self.path}, "
+            f"retry {self.attempt}/{self.max_retries} in {self.delay:.1f}s"
+        )
 
 
 class DatadogClient:
@@ -60,19 +115,54 @@ class DatadogClient:
         site: str,
         pat: str,
         timeout: float = 15.0,
+        max_retries: int = 5,
+        backoff_base: float = 0.5,
+        backoff_max: float = 30.0,
+        retry_budget: float | None = None,
+        on_retry: Callable[[RetryEvent], None] | None = None,
+        transport: httpx.BaseTransport | None = None,
+        sleep: Callable[[float], None] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         """Create a Datadog HTTP client.
 
         Authenticates with a Personal Access Token (``pat``), sent as an
         ``Authorization: Bearer`` header. A PAT is a single, scoped, expiring
         credential and does not need to be paired with an API key.
+
+        Args:
+            timeout: Per-request timeout in seconds.
+            max_retries: Retries *after* the initial attempt.
+            backoff_base: Base for the exponential backoff, in seconds.
+            backoff_max: Ceiling for any single sleep. Also clamps
+                server-supplied ``Retry-After`` values, so a hostile or absurd
+                header cannot hang the CLI.
+            retry_budget: Total wall-clock ceiling for retry sleeps. Defaults
+                to ``max(120, 4 * timeout)`` -- a flat ceiling would give
+                effectively zero retries to flex-tier users, who are told to
+                raise ``--timeout``, i.e. exactly the slowest and most
+                rate-limited queries.
+            on_retry: Called with a :class:`RetryEvent` before each sleep.
+            transport: Injection point for tests (``httpx.MockTransport``).
+            sleep / monotonic: Injection points for a deterministic clock.
         """
         if not pat:
             raise ValueError("DatadogClient requires a PAT (pat=...).")
 
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+        self.backoff_max = backoff_max
+        self.retry_budget = (
+            retry_budget if retry_budget is not None else max(120.0, 4 * timeout)
+        )
+        self._on_retry = on_retry
+        self._sleep = sleep or time.sleep
+        self._monotonic = monotonic or time.monotonic
+
         self._client = httpx.Client(
             base_url=_api_host(site),
             timeout=timeout,
+            transport=transport,
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",
@@ -94,6 +184,76 @@ class DatadogClient:
     ) -> None:
         self.close()
 
+    # ── Retry machinery ─────────────────────────────────────────────
+
+    def _parse_retry_after(self, value: str | None) -> float | None:
+        """Parse a ``Retry-After`` header (delta-seconds or HTTP-date)."""
+        if not value:
+            return None
+        value = value.strip()
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when is None:
+            return None
+        import datetime as _dt
+
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=_dt.UTC)
+        delta = (when - _dt.datetime.now(_dt.UTC)).total_seconds()
+        return max(0.0, delta)
+
+    def _retry_delay(self, resp: httpx.Response | None, attempt: int) -> float:
+        """Seconds to wait before the next attempt.
+
+        Prefers the server's own guidance (``Retry-After``, then
+        ``X-RateLimit-Reset``) over guessing, but clamps it to ``backoff_max``
+        so a hostile header cannot hang the CLI. With no guidance, uses
+        full-jitter exponential backoff.
+        """
+        if resp is not None:
+            hinted = self._parse_retry_after(resp.headers.get("Retry-After"))
+            if hinted is None:
+                reset = resp.headers.get("X-RateLimit-Reset")
+                if reset:
+                    try:
+                        hinted = max(0.0, float(reset))
+                    except ValueError:
+                        hinted = None
+            if hinted is not None and hinted > 0:
+                return min(hinted, self.backoff_max)
+
+        cap = min(self.backoff_max, self.backoff_base * (2**attempt))
+        return random.uniform(0.0, cap)
+
+    def _should_retry(
+        self,
+        *,
+        write: bool,
+        status: int | None,
+        resp: httpx.Response | None,
+    ) -> bool:
+        if status is None:
+            # Transport error. Safe to repeat only for reads.
+            return not write
+
+        if status == 429:
+            if not write:
+                return True
+            # A bare 429 may have come from an intermediary *after* the origin
+            # accepted the write. Only retry when Datadog's own rate-limit
+            # headers prove the limiter was Datadog's.
+            headers = resp.headers if resp is not None else {}
+            return any(h in headers for h in _DD_RATELIMIT_HEADERS)
+
+        # A 5xx on a write may mean the write landed. Never risk a duplicate.
+        return status in RETRYABLE_SERVER_ERRORS and not write
+
     def _request(
         self,
         method: str,
@@ -101,34 +261,127 @@ class DatadogClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Make a request and return parsed JSON response.
+        write: bool = False,
+    ) -> Any:
+        """Make a request with retry and return the parsed JSON response.
+
+        Prefer the :meth:`_read` / :meth:`_write` wrappers over calling this
+        directly; they make the retry policy explicit at the call site.
 
         Raises:
-            DatadogAPIError: On 4xx/5xx responses
-            RuntimeError: On network errors or invalid JSON
+            DatadogAPIError: On non-retryable 4xx/5xx, or on retry exhaustion.
+                Never returns an empty or zero value to represent a failure.
+            RuntimeError: On network errors or invalid JSON.
         """
-        try:
-            resp = self._client.request(method, path, params=params, json=json_body)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            # Try to extract error message from Datadog's response
-            msg = "Datadog API error"
-            body = e.response.text
+        max_retries = (
+            min(self.max_retries, _WRITE_MAX_RETRIES) if write else (self.max_retries)
+        )
+        started = self._monotonic()
+        attempt = 0
+
+        while True:
+            attempt += 1
+            resp: httpx.Response | None = None
+            status: int | None = None
+            transport_error: httpx.RequestError | None = None
+
             try:
-                payload = e.response.json()
+                sent = self._client.request(method, path, params=params, json=json_body)
+                resp = sent
+                sent.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                resp = e.response
+                status = e.response.status_code
+            except httpx.RequestError as e:
+                transport_error = e
+
+            if status is None and transport_error is None:
+                assert resp is not None
+                try:
+                    return resp.json()
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"Invalid JSON response: {e.msg}") from e
+
+            retryable = self._should_retry(write=write, status=status, resp=resp)
+            elapsed = self._monotonic() - started
+
+            if retryable and attempt <= max_retries:
+                delay = self._retry_delay(
+                    resp if status is not None else None, attempt - 1
+                )
+                if elapsed + delay <= self.retry_budget:
+                    if self._on_retry is not None:
+                        self._on_retry(
+                            RetryEvent(
+                                status=status,
+                                path=path,
+                                attempt=attempt,
+                                max_retries=max_retries,
+                                delay=delay,
+                                reason=(
+                                    "network error"
+                                    if transport_error is not None
+                                    else "http error"
+                                ),
+                            )
+                        )
+                    self._sleep(delay)
+                    continue
+
+            elapsed = self._monotonic() - started
+
+            if transport_error is not None:
+                raise RuntimeError(
+                    f"Network error after {attempt} attempt(s): {transport_error}"
+                ) from transport_error
+
+            assert resp is not None and status is not None
+            msg = "Datadog API error"
+            body = resp.text
+            try:
+                payload = resp.json()
                 if isinstance(payload, dict) and payload.get("errors"):
                     msg = "; ".join(str(err) for err in payload["errors"])
             except Exception:
                 pass
-            raise DatadogAPIError(e.response.status_code, msg, body) from e
-        except httpx.RequestError as e:
-            raise RuntimeError(f"Network error: {e}") from e
+            raise DatadogAPIError(
+                status, msg, body, attempts=attempt, elapsed_s=elapsed
+            )
 
-        try:
-            return resp.json()
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Invalid JSON response: {e.msg}") from e
+    def _read(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
+        """Perform a read-only request. Retries 429, 5xx, and network errors.
+
+        Some Datadog reads are POSTs (log search, error-tracking search), so
+        the policy is chosen explicitly rather than inferred from the verb.
+        """
+        return self._request(
+            method, path, params=params, json_body=json_body, write=False
+        )
+
+    def _write(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
+        """Perform a state-changing request.
+
+        Retries only a 429 that carries Datadog's rate-limit headers, and only
+        once. Never retries 5xx or network errors, either of which may mean the
+        write actually landed.
+        """
+        return self._request(
+            method, path, params=params, json_body=json_body, write=True
+        )
 
     def get_incident(
         self,
@@ -138,17 +391,15 @@ class DatadogClient:
     ) -> dict[str, Any]:
         """Get incident by ID."""
         params = {"include": include} if include else None
-        return self._request("GET", f"/api/v2/incidents/{incident_id}", params=params)
+        return self._read("GET", f"/api/v2/incidents/{incident_id}", params=params)
 
     def get_incident_type(self, incident_type_uuid: str) -> dict[str, Any]:
         """Get incident type configuration by UUID."""
-        return self._request(
-            "GET", f"/api/v2/incidents/config/types/{incident_type_uuid}"
-        )
+        return self._read("GET", f"/api/v2/incidents/config/types/{incident_type_uuid}")
 
     def get_incident_integrations(self, incident_id: str) -> dict[str, Any]:
         """Get incident integrations (Slack, Jira, etc.)."""
-        return self._request(
+        return self._read(
             "GET", f"/api/v2/incidents/{incident_id}/relationships/integrations"
         )
 
@@ -166,7 +417,7 @@ class DatadogClient:
                 "attributes": attributes,
             }
         }
-        return self._request(
+        return self._write(
             "PATCH", f"/api/v2/incidents/{incident_id}", json_body=payload
         )
 
@@ -198,7 +449,7 @@ class DatadogClient:
         if cursor:
             body["page"]["cursor"] = cursor
 
-        return self._request("POST", "/api/v2/logs/events/search", json_body=body)
+        return self._read("POST", "/api/v2/logs/events/search", json_body=body)
 
     def validate(self) -> dict[str, Any]:
         """Validate the PAT via /api/v2/current_user.
@@ -206,7 +457,7 @@ class DatadogClient:
         (The legacy /api/v1/validate endpoint only validates an API key and
         rejects a PAT with 403, so it is not used.)
         """
-        return self._request("GET", "/api/v2/current_user")
+        return self._read("GET", "/api/v2/current_user")
 
     def list_catalog_entities(
         self,
@@ -238,7 +489,7 @@ class DatadogClient:
         if include_discovered:
             params["includeDiscovered"] = True
 
-        return self._request("GET", "/api/v2/catalog/entity", params=params)
+        return self._read("GET", "/api/v2/catalog/entity", params=params)
 
     # ── Teams (v2) ─────────────────────────────────────────────────
 
@@ -269,7 +520,7 @@ class DatadogClient:
         if sort:
             params["sort"] = sort
 
-        return self._request("GET", "/api/v2/team", params=params)
+        return self._read("GET", "/api/v2/team", params=params)
 
     def list_team_memberships(
         self,
@@ -290,7 +541,7 @@ class DatadogClient:
         if sort:
             params["sort"] = sort
 
-        return self._request(
+        return self._read(
             "GET",
             f"/api/v2/team/{team_id}/memberships",
             params=params,
@@ -298,7 +549,7 @@ class DatadogClient:
 
     def list_team_notification_rules(self, team_id: str) -> dict[str, Any]:
         """List notification rules for one Datadog Team."""
-        return self._request("GET", f"/api/v2/team/{team_id}/notification-rules")
+        return self._read("GET", f"/api/v2/team/{team_id}/notification-rules")
 
     # ── Log-based metrics (v2) ──────────────────────────────────────
 
@@ -329,19 +580,19 @@ class DatadogClient:
                 "attributes": attributes,
             }
         }
-        return self._request("POST", "/api/v2/logs/config/metrics", json_body=payload)
+        return self._write("POST", "/api/v2/logs/config/metrics", json_body=payload)
 
     def get_log_metric(self, metric_id: str) -> dict[str, Any]:
         """Get a log-based metric by ID."""
-        return self._request("GET", f"/api/v2/logs/config/metrics/{metric_id}")
+        return self._read("GET", f"/api/v2/logs/config/metrics/{metric_id}")
 
     def list_log_metrics(self) -> dict[str, Any]:
         """List all log-based metrics."""
-        return self._request("GET", "/api/v2/logs/config/metrics")
+        return self._read("GET", "/api/v2/logs/config/metrics")
 
     def delete_log_metric(self, metric_id: str) -> dict[str, Any]:
         """Delete a log-based metric by ID."""
-        return self._request("DELETE", f"/api/v2/logs/config/metrics/{metric_id}")
+        return self._write("DELETE", f"/api/v2/logs/config/metrics/{metric_id}")
 
     # ── Monitors (v1) ───────────────────────────────────────────────
 
@@ -369,7 +620,7 @@ class DatadogClient:
             payload["options"] = options
         if priority is not None:
             payload["priority"] = priority
-        return self._request("POST", "/api/v1/monitor", json_body=payload)
+        return self._write("POST", "/api/v1/monitor", json_body=payload)
 
     def update_monitor(
         self,
@@ -383,7 +634,7 @@ class DatadogClient:
         message, options, tags, priority, etc.). Fields not included
         are left unchanged by the API.
         """
-        return self._request("PUT", f"/api/v1/monitor/{monitor_id}", json_body=payload)
+        return self._write("PUT", f"/api/v1/monitor/{monitor_id}", json_body=payload)
 
     def search_monitors(
         self,
@@ -394,7 +645,7 @@ class DatadogClient:
         params = {}
         if query:
             params["query"] = query
-        return self._request("GET", "/api/v1/monitor/search", params=params)
+        return self._read("GET", "/api/v1/monitor/search", params=params)
 
     def list_monitors(
         self,
@@ -429,9 +680,15 @@ class DatadogClient:
         if name:
             params["name"] = name
         # The v1 list endpoint returns a bare JSON array, not a wrapped object.
-        # _request is typed as -> dict for the common case; cast accordingly.
-        result: Any = self._request("GET", "/api/v1/monitor", params=params)
-        return result if isinstance(result, list) else []
+        result: Any = self._read("GET", "/api/v1/monitor", params=params)
+        if not isinstance(result, list):
+            # Never let an unexpected response shape become an empty list --
+            # that is an error masquerading as "no monitors matched".
+            raise RuntimeError(
+                "GET /api/v1/monitor expected a JSON array, got "
+                f"{type(result).__name__}: {str(result)[:200]}"
+            )
+        return result
 
     def get_monitor(
         self,
@@ -449,9 +706,7 @@ class DatadogClient:
         params: dict[str, Any] = {}
         if group_states:
             params["group_states"] = group_states
-        return self._request(
-            "GET", f"/api/v1/monitor/{monitor_id}", params=params or None
-        )
+        return self._read("GET", f"/api/v1/monitor/{monitor_id}", params=params or None)
 
     # ── Dashboards (v1) ─────────────────────────────────────────────
 
@@ -462,7 +717,7 @@ class DatadogClient:
         layout_type, widgets, template_variables, etc.). It is sent as-is
         so callers can supply the exact widget/layout definition.
         """
-        return self._request("POST", "/api/v1/dashboard", json_body=body)
+        return self._write("POST", "/api/v1/dashboard", json_body=body)
 
     def update_dashboard(
         self, dashboard_id: str, *, body: dict[str, Any]
@@ -474,11 +729,11 @@ class DatadogClient:
         template_variables, etc.). It is sent as-is so callers can supply the
         exact widget/layout definition.
         """
-        return self._request("PUT", f"/api/v1/dashboard/{dashboard_id}", json_body=body)
+        return self._write("PUT", f"/api/v1/dashboard/{dashboard_id}", json_body=body)
 
     def get_dashboard(self, dashboard_id: str) -> dict[str, Any]:
         """Get a dashboard's full definition by ID."""
-        return self._request("GET", f"/api/v1/dashboard/{dashboard_id}")
+        return self._read("GET", f"/api/v1/dashboard/{dashboard_id}")
 
     def list_dashboards(
         self,
@@ -500,11 +755,11 @@ class DatadogClient:
             params["filter[shared]"] = filter_shared
         if filter_deleted is not None:
             params["filter[deleted]"] = filter_deleted
-        return self._request("GET", "/api/v1/dashboard", params=params or None)
+        return self._read("GET", "/api/v1/dashboard", params=params or None)
 
     def delete_dashboard(self, dashboard_id: str) -> dict[str, Any]:
         """Delete a dashboard by ID."""
-        return self._request("DELETE", f"/api/v1/dashboard/{dashboard_id}")
+        return self._write("DELETE", f"/api/v1/dashboard/{dashboard_id}")
 
     # ── Error Tracking (v2) ────────────────────────────────────────
 
@@ -546,7 +801,7 @@ class DatadogClient:
         if include:
             params["include"] = include
 
-        return self._request(
+        return self._read(
             "POST",
             "/api/v2/error-tracking/issues/search",
             json_body=body,
@@ -563,7 +818,7 @@ class DatadogClient:
         params = {}
         if include:
             params["include"] = include
-        return self._request(
+        return self._read(
             "GET",
             f"/api/v2/error-tracking/issues/{issue_id}",
             params=params,
@@ -582,7 +837,7 @@ class DatadogClient:
                 "type": "update_request",
             }
         }
-        return self._request(
+        return self._write(
             "PUT",
             f"/api/v2/error-tracking/issues/{issue_id}/state",
             json_body=body,
@@ -612,11 +867,11 @@ class DatadogClient:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        return self._request("GET", "/api/v1/slo", params=params or None)
+        return self._read("GET", "/api/v1/slo", params=params or None)
 
     def get_slo(self, slo_id: str) -> dict[str, Any]:
         """Get a single SLO by ID."""
-        return self._request("GET", f"/api/v1/slo/{slo_id}")
+        return self._read("GET", f"/api/v1/slo/{slo_id}")
 
     def get_slo_history(
         self,
@@ -636,19 +891,19 @@ class DatadogClient:
             "from_ts": from_ts,
             "to_ts": to_ts,
         }
-        return self._request("GET", f"/api/v1/slo/{slo_id}/history", params=params)
+        return self._read("GET", f"/api/v1/slo/{slo_id}/history", params=params)
 
     # ── Workflows (v2) ──────────────────────────────────────────────
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         """Get a workflow definition by ID."""
-        return self._request("GET", f"/api/v2/workflows/{workflow_id}")
+        return self._read("GET", f"/api/v2/workflows/{workflow_id}")
 
     def get_workflow_instance(
         self, workflow_id: str, instance_id: str
     ) -> dict[str, Any]:
         """Get a workflow execution instance."""
-        return self._request(
+        return self._read(
             "GET",
             f"/api/v2/workflows/{workflow_id}/instances/{instance_id}",
         )
@@ -658,7 +913,7 @@ class DatadogClient:
     def get_pagerduty_integration_service(self, service_name: str) -> dict[str, Any]:
         """Get PagerDuty integration service by name."""
         escaped_name = urllib.parse.quote(service_name, safe="")
-        return self._request(
+        return self._read(
             "GET",
             f"/api/v1/integration/pagerduty/configuration/services/{escaped_name}",
         )

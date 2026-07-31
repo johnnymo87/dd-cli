@@ -126,6 +126,28 @@ without another request, so the precision lives in `truncation_reason`
 (`more_available`, `max_pages`, `max_results_boundary_unknown`,
 `server_timeout`), not in the boolean.
 
+### What the envelope does and does not protect
+
+Verified against the real CLI with a forced failure:
+
+| Caller pattern | Detects the failure? |
+| --- | --- |
+| `dd-cli ...; echo $?` | yes (exit 1) |
+| `set -o pipefail` around the pipeline | yes (exit 1) |
+| `... \| jq -e '.count'` | yes (jq -e exits 1 on null) |
+| `.ok` / `.truncated` field check | yes |
+| `n=$(... \| jq '.count'); total=$((total + ${n:-0}))` | **NO -- still 0** |
+
+The last row is the incident-1 pattern and it is *not* fixed by the envelope.
+`jq '.count'` now prints `null` instead of nothing, but bash evaluates
+`$((0 + null))` as `0` because it treats a bare identifier as an unset variable.
+No value dd-cli can print on stdout defeats shell arithmetic on scraped text.
+
+So the envelope protects consumers that read *structure* -- which is this tool's
+actual audience. If you must scrape in shell, use `set -o pipefail` and check
+`$?`, or branch on `.ok`. Better: use `count-logs --bucket` and do not write the
+loop at all.
+
 ### Reliability
 
 `http.py` retries 429/5xx with backoff, honoring `Retry-After` and

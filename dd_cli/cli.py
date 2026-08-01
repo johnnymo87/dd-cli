@@ -2956,6 +2956,311 @@ def _parse_time_to_epoch_s(value: str) -> int:
     return int(_parse_relative_seconds(value))
 
 
+# 1e11 epoch seconds is the year 5138, so anything at or above it is a
+# millisecond timestamp that was passed to a seconds-valued flag. The API
+# answers such a window with an unhelpful "Internal error", so catch it here.
+_EPOCH_SECONDS_CEILING = 100_000_000_000
+
+
+def _require_epoch_seconds(flag: str, value: int) -> int:
+    """Reject an epoch-millisecond value passed to a seconds-valued flag."""
+    if value >= _EPOCH_SECONDS_CEILING:
+        raise click.UsageError(
+            f"{flag}={value} looks like epoch milliseconds. This flag takes "
+            "epoch seconds (or a relative time such as now-1h); divide by 1000."
+        )
+    return value
+
+
+def _summarize_metric_series(series: dict[str, Any]) -> dict[str, Any]:
+    """Reduce one timeseries to its scope and a few aggregates.
+
+    Aggregates cover only non-null, finite points. A series with no such
+    points (an empty pointlist, or one that is entirely null) yields null
+    aggregates rather than raising.
+    """
+    raw_points = series.get("pointlist")
+    pointlist = raw_points if isinstance(raw_points, list) else []
+    values: list[float] = []
+    last_ts: int | None = None
+
+    def _number(candidate: Any) -> float | None:
+        # bool is a subclass of int, so it has to be excluded explicitly.
+        if not isinstance(candidate, (int, float)) or isinstance(candidate, bool):
+            return None
+        return float(candidate) if math.isfinite(candidate) else None
+
+    for point in pointlist:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        value = _number(point[1])
+        if value is None:
+            continue
+        values.append(value)
+        timestamp = _number(point[0])
+        last_ts = int(timestamp) if timestamp is not None else None
+
+    return {
+        "scope": series.get("scope"),
+        "metric": series.get("metric"),
+        "query_index": series.get("query_index"),
+        # Seconds per point. Datadog rolls long windows up automatically, so
+        # this is what tells you how coarse the aggregates below really are.
+        "interval": series.get("interval"),
+        # Passed through as-is: this can be [unit, null], [null, null], or absent.
+        "unit": series.get("unit"),
+        "points": len(pointlist),
+        "non_null_points": len(values),
+        "first": values[0] if values else None,
+        "last": values[-1] if values else None,
+        # Timestamp (epoch ms) of the last non-null point. Distinguishes
+        # "the value is 0 right now" from "nothing has reported in a while".
+        "last_ts": last_ts,
+        "min": min(values) if values else None,
+        "max": max(values) if values else None,
+        "avg": sum(values) / len(values) if values else None,
+    }
+
+
+def _metric_query_error(data: dict[str, Any]) -> str:
+    """Extract the error text from a failed query response body."""
+    for key in ("error", "message"):
+        text = data.get(key)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    # Some Datadog error bodies use an 'errors' list instead.
+    errors = data.get("errors")
+    if isinstance(errors, list):
+        joined = "; ".join(str(e) for e in errors if str(e).strip())
+        if joined:
+            return joined
+
+    return (
+        f"Datadog reported status={data.get('status')!r} with no error text. "
+        f"Response: {json.dumps(data)[:300]}"
+    )
+
+
+def _metric_query_summary(
+    data: dict[str, Any],
+    *,
+    query: str,
+    from_ts: int,
+    to_ts: int,
+) -> dict[str, Any]:
+    """Build the human-scannable summary of a timeseries query response."""
+    series = data.get("series") or []
+    summaries = [_summarize_metric_series(s) for s in series]
+
+    extra: dict[str, Any] = {
+        "query": query,
+        "from": from_ts,
+        "to": to_ts,
+        "res_type": data.get("res_type"),
+    }
+
+    message = data.get("message")
+    if isinstance(message, str) and message.strip():
+        extra["message"] = message
+
+    if not summaries:
+        # Zero series is ambiguous: a metric that does not exist and a metric
+        # whose tag scope or window has no data look identical here.
+        extra["note"] = (
+            "No series returned. Either the metric name or the tag filter "
+            "matches nothing (names are separator-sensitive, so try "
+            "'dd-cli search-metrics'), or the time window covers no data."
+        )
+    elif all(s["non_null_points"] == 0 for s in summaries):
+        extra["note"] = (
+            "Series were returned but every point is null. This is common "
+            "with formula, division, and timeshift queries."
+        )
+
+    return success_envelope(summaries, extra=extra)
+
+
+@cli.command("query-metrics")
+@click.argument("query", metavar="QUERY")
+@click.option(
+    "--from",
+    "time_from",
+    default="now-1h",
+    show_default=True,
+    help="Start time (e.g., now-20m, now-1h, or epoch seconds)",
+)
+@click.option(
+    "--to",
+    "time_to",
+    default=None,
+    help="End time (default: now)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+    help=(
+        "Output format. summary: per-series scope plus first/last/min/max/avg "
+        "over the window. json: the raw API response. jsonl: one raw series "
+        "per line, no wrapper."
+    ),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def query_metrics_cmd(
+    query: str,
+    time_from: str,
+    time_to: str | None,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Query a metric timeseries and summarize each series over the window.
+
+    The default summary gives one line-ish object per series: its tag scope
+    plus first/last/min/max/avg over the window, the number of points, and how
+    many of them were non-null. Use --format json for the raw API response.
+
+    Datadog rolls long windows up automatically and averages by default, so
+    'max' over a multi-day window is a max of interval averages and understates
+    short spikes. The 'interval' field shows the granularity in use; add
+    '.rollup(max, 60)' to the query when you need true peaks.
+
+    \b
+    Examples:
+      # Lag per consumer group over the last 20 minutes
+      dd-cli query-metrics 'avg:kafka.consumer_lag{*} by {consumer_group}' \\
+        --from now-20m
+
+      # Raw points for scripting
+      dd-cli query-metrics 'avg:system.cpu.user{*}' --format json | \\
+        jq '.series[0].pointlist'
+    """
+    from_ts = _require_epoch_seconds("--from", _parse_time_to_epoch_s(time_from))
+    to_ts = _require_epoch_seconds("--to", _parse_time_to_epoch_s(time_to or "now"))
+
+    if from_ts >= to_ts:
+        raise click.UsageError(
+            f"Empty time window: --from ({from_ts}) is not before --to ({to_ts})."
+        )
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.query_timeseries(query=query, from_ts=from_ts, to_ts=to_ts)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        _handle_runtime_error(e)
+
+    # A query error arrives as HTTP 200 with status=error in the body, so this
+    # has to be checked explicitly -- and before the format branch, so that no
+    # output format can turn a failure into a silent, zero-exit no-op. It goes
+    # through the same failure envelope as a transport error, because to a
+    # caller reading .count there is no difference between the two.
+    status = data.get("status")
+    has_error_payload = bool(data.get("error")) or bool(data.get("errors"))
+    if (status is not None and status != "ok") or has_error_payload:
+        _handle_runtime_error(RuntimeError(_metric_query_error(data)))
+
+    if output_format == "json":
+        emit(success_envelope(data))
+    elif output_format == "jsonl":
+        for series in data.get("series") or []:
+            click.echo(json.dumps(series))
+    else:
+        emit(_metric_query_summary(data, query=query, from_ts=from_ts, to_ts=to_ts))
+
+
+@cli.command("search-metrics")
+@click.argument("term", metavar="TERM")
+@click.option(
+    "--limit",
+    type=int,
+    default=100,
+    show_default=True,
+    help="Max metric names to print (the API itself returns every match).",
+)
+@truncation_option
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def search_metrics_cmd(
+    term: str,
+    limit: int,
+    on_truncation: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Find metric names containing TERM.
+
+    Useful before writing a query or a monitor, because a metric name guessed
+    with the wrong separator matches nothing and a monitor built on it never
+    fires.
+
+    TERM is matched as a literal substring, so '.' is not a wildcard and a
+    dotted guess will not find an underscored name. Search a short distinctive
+    token ('lag') rather than a full guessed name ('kafka.consumer.lag').
+
+    The index only covers recently-reporting metrics, so absence here is not
+    proof that a metric does not exist.
+
+    \b
+    Example:
+        dd-cli search-metrics lag --limit 50
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.search_metrics(term=term)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        _handle_runtime_error(e)
+
+    # A search with no matches returns metrics: null rather than [].
+    names = (data.get("results") or {}).get("metrics") or []
+
+    # The endpoint is uncapped, so --limit is the only thing standing between a
+    # broad term and tens of thousands of lines. That makes the printed list a
+    # partial answer, and the total is known exactly, so say so rather than
+    # letting a caller read count as "this is how many matched".
+    result = PagedResult(items=list(names), pages_fetched=1).limited(
+        limit, REASON_MORE_AVAILABLE
+    )
+
+    payload = success_envelope(
+        result.items,
+        result=result,
+        extra={"term": term, "total": len(names)},
+    )
+    finish(result, payload, on_truncation=on_truncation, describe="search-metrics")
+
+
 @cli.command("get-workflow")
 @click.argument("workflow_url_or_id", metavar="WORKFLOW")
 @click.option(

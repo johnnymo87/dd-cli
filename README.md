@@ -23,6 +23,12 @@ dd-cli search-logs 'env:prod error' --from now-1h
 # Get incident
 dd-cli get-incident 152 --enrich
 
+# Summarize a metric timeseries per tag scope
+dd-cli query-metrics 'avg:system.cpu.user{*} by {host}' --from now-20m
+
+# Find a metric name (names are separator-sensitive)
+dd-cli search-metrics cpu.user
+
 # List Software Catalog services owned by a team
 dd-cli list-catalog-entities --kind service --owner platform-team --include raw_schema
 

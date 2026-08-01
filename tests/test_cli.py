@@ -2986,3 +2986,527 @@ class TestMonitorOptionFlagCoverage:
             | {"renotify_status", "option"}
         )
         assert dests == handled
+
+
+class TestMetricsClient:
+    """Tests for the metrics methods on DatadogClient.
+
+    These assert at the _read level because the CLI tests patch
+    DatadogClient wholesale, which would otherwise leave the endpoint
+    paths, the retry policy, and the epoch-seconds contract completely
+    uncovered.
+    """
+
+    def test_query_timeseries_uses_v1_query_with_epoch_seconds(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
+        try:
+            dd._read = MagicMock(return_value={"status": "ok", "series": []})
+            dd.query_timeseries(
+                query="avg:a.b{*}by{c}",
+                from_ts=1700000000,
+                to_ts=1700001200,
+            )
+            dd._read.assert_called_once_with(
+                "GET",
+                "/api/v1/query",
+                params={
+                    "query": "avg:a.b{*}by{c}",
+                    "from": 1700000000,
+                    "to": 1700001200,
+                },
+            )
+        finally:
+            dd.close()
+
+    def test_search_metrics_prefixes_term_with_metrics_facet(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
+        try:
+            dd._read = MagicMock(return_value={"results": {"metrics": []}})
+            dd.search_metrics(term="consumer_lag")
+            dd._read.assert_called_once_with(
+                "GET",
+                "/api/v1/search",
+                params={"q": "metrics:consumer_lag"},
+            )
+        finally:
+            dd.close()
+
+
+class TestQueryMetrics:
+    """Tests for the query-metrics command."""
+
+    def _ok(self, series, **overrides):
+        """Build a representative /api/v1/query success response."""
+        body = {
+            "status": "ok",
+            "res_type": "time_series",
+            "resp_version": 1,
+            "query": "avg:a.b{*}",
+            "from_date": 1700000000000,
+            "to_date": 1700001200000,
+            "series": series,
+            "values": [],
+            "times": [],
+            "message": "",
+            "group_by": [],
+        }
+        body.update(overrides)
+        return body
+
+    def _series(self, **overrides):
+        s = {
+            "scope": "consumer_group:example",
+            "metric": "a.b",
+            "expression": "avg:a.b{*}",
+            "query_index": 0,
+            "interval": 20,
+            "unit": [{"name": "unit", "short_name": "u"}, None],
+            "pointlist": [
+                [1700000000000.0, 10.0],
+                [1700000020000.0, 2.0],
+                [1700000040000.0, 6.0],
+            ],
+        }
+        s.update(overrides)
+        return s
+
+    def _run(self, runner, response, extra_args=()):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.query_timeseries.return_value = response
+            mock_client_class.return_value = mock_client
+            result = runner.invoke(
+                cli,
+                [
+                    "query-metrics",
+                    "avg:a.b{*}",
+                    "--from",
+                    "1700000000",
+                    "--to",
+                    "1700001200",
+                    *extra_args,
+                ],
+            )
+            return result, mock_client
+
+    def test_passes_explicit_epoch_window_to_client(self, runner, mock_env):
+        result, mock_client = self._run(runner, self._ok([self._series()]))
+
+        assert result.exit_code == 0, result.output
+        mock_client.query_timeseries.assert_called_once_with(
+            query="avg:a.b{*}", from_ts=1700000000, to_ts=1700001200
+        )
+
+    def test_summary_reports_scope_and_aggregates(self, runner, mock_env):
+        result, _ = self._run(runner, self._ok([self._series()]))
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["ok"] is True
+        assert out["truncated"] is False
+        assert out["count"] == 1
+        assert out["from"] == 1700000000
+        assert out["to"] == 1700001200
+        assert out["res_type"] == "time_series"
+        s = out["data"][0]
+        assert s["scope"] == "consumer_group:example"
+        assert s["metric"] == "a.b"
+        assert s["query_index"] == 0
+        assert s["interval"] == 20
+        assert s["points"] == 3
+        assert s["non_null_points"] == 3
+        assert s["first"] == 10.0
+        assert s["last"] == 6.0
+        assert s["last_ts"] == 1700000040000
+        assert s["min"] == 2.0
+        assert s["max"] == 10.0
+        assert s["avg"] == 6.0
+        assert "note" not in out
+
+    def test_first_last_skip_null_points(self, runner, mock_env):
+        """first/last are the first/last NON-NULL points, not pointlist ends."""
+        series = self._series(
+            pointlist=[
+                [1700000000000.0, None],
+                [1700000020000.0, 5.0],
+                [1700000040000.0, 3.0],
+                [1700000060000.0, None],
+            ]
+        )
+        result, _ = self._run(runner, self._ok([series]))
+
+        assert result.exit_code == 0, result.output
+        s = json.loads(result.output)["data"][0]
+        assert s["first"] == 5.0
+        assert s["last"] == 3.0
+        assert s["last_ts"] == 1700000040000
+        assert s["points"] == 4
+        assert s["non_null_points"] == 2
+
+    def test_all_null_series_reports_nulls_and_note(self, runner, mock_env):
+        """A series of only null points must not crash on min()/max()."""
+        series = self._series(
+            pointlist=[[1700000000000.0, None], [1700000020000.0, None]]
+        )
+        result, _ = self._run(runner, self._ok([series]))
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        s = out["data"][0]
+        assert s["non_null_points"] == 0
+        assert s["points"] == 2
+        for key in ("first", "last", "last_ts", "min", "max", "avg"):
+            assert s[key] is None
+        assert "every point is null" in out["note"]
+
+    def test_empty_pointlist(self, runner, mock_env):
+        result, _ = self._run(runner, self._ok([self._series(pointlist=[])]))
+
+        assert result.exit_code == 0, result.output
+        s = json.loads(result.output)["data"][0]
+        assert s["points"] == 0
+        assert s["non_null_points"] == 0
+        assert s["max"] is None
+
+    def test_missing_pointlist_key(self, runner, mock_env):
+        series = self._series()
+        del series["pointlist"]
+        result, _ = self._run(runner, self._ok([series]))
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"][0]["points"] == 0
+
+    def test_non_finite_values_are_ignored(self, runner, mock_env):
+        series = self._series(
+            pointlist=[
+                [1700000000000.0, float("nan")],
+                [1700000020000.0, 4.0],
+                [1700000040000.0, float("inf")],
+            ]
+        )
+        result, _ = self._run(runner, self._ok([series]))
+
+        assert result.exit_code == 0, result.output
+        s = json.loads(result.output)["data"][0]
+        assert s["non_null_points"] == 1
+        assert s["max"] == 4.0
+        assert s["min"] == 4.0
+
+    def test_zero_series_note_names_both_hypotheses(self, runner, mock_env):
+        """Zero series is ambiguous: wrong name/tags OR wrong window."""
+        result, _ = self._run(runner, self._ok([]))
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["count"] == 0
+        assert out["data"] == []
+        note = out["note"].lower()
+        assert "search-metrics" in note
+        assert "tag" in note
+        assert "window" in note
+
+    def test_body_error_under_http_200_exits_non_zero(self, runner, mock_env):
+        """A malformed query returns HTTP 200 with status=error."""
+        body = self._ok(
+            [],
+            status="error",
+            error="Error parsing query: unable to parse foo{{{",
+        )
+        result, _ = self._run(runner, body)
+
+        assert result.exit_code != 0
+        assert "Error parsing query" in result.output
+        envelope = json.loads(result.stdout)
+        assert envelope["ok"] is False
+        # Never 0 or []: a failed request observed nothing.
+        assert envelope["count"] is None
+        assert envelope["data"] is None
+
+    def test_body_error_without_error_key_falls_back(self, runner, mock_env):
+        body = self._ok([], status="error", message="something went wrong")
+        result, _ = self._run(runner, body)
+
+        assert result.exit_code != 0
+        assert "something went wrong" in result.output
+
+    def test_body_error_with_no_text_still_fails_loudly(self, runner, mock_env):
+        body = {"status": "error", "series": []}
+        result, _ = self._run(runner, body)
+
+        assert result.exit_code != 0
+        assert result.output.strip()
+
+    def test_body_errors_list_is_surfaced(self, runner, mock_env):
+        """Some Datadog error bodies carry an 'errors' list instead."""
+        body = self._ok([], status="error", errors=["Query parse error"])
+        result, _ = self._run(runner, body)
+
+        assert result.exit_code != 0
+        assert "Query parse error" in result.output
+        # ...as the message itself, not as part of a raw-body dump.
+        assert "no error text" not in result.output
+
+    def test_error_body_without_status_key_still_fails(self, runner, mock_env):
+        result, _ = self._run(runner, {"error": "boom", "series": []})
+
+        assert result.exit_code != 0
+        assert "boom" in result.output
+
+    def test_non_list_pointlist_does_not_crash(self, runner, mock_env):
+        result, _ = self._run(runner, self._ok([self._series(pointlist=123)]))
+
+        assert result.exit_code == 0, result.output
+        s = json.loads(result.output)["data"][0]
+        assert s["points"] == 0
+        assert s["max"] is None
+
+    def test_bogus_timestamp_does_not_become_last_ts(self, runner, mock_env):
+        """A boolean is an int in Python; it must not pass as a timestamp."""
+        series = self._series(pointlist=[[True, 10.0]])
+        result, _ = self._run(runner, self._ok([series]))
+
+        assert result.exit_code == 0, result.output
+        s = json.loads(result.output)["data"][0]
+        assert s["last"] == 10.0
+        assert s["last_ts"] is None
+
+    def test_non_empty_message_is_surfaced(self, runner, mock_env):
+        body = self._ok([self._series()], message="results were truncated")
+        result, _ = self._run(runner, body)
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["message"] == "results were truncated"
+
+    def test_empty_message_is_omitted(self, runner, mock_env):
+        result, _ = self._run(runner, self._ok([self._series()]))
+
+        assert "message" not in json.loads(result.output)
+
+    def test_multiple_series_all_summarized_in_order(self, runner, mock_env):
+        body = self._ok(
+            [
+                self._series(scope="consumer_group:one", query_index=0),
+                self._series(scope="consumer_group:two", query_index=1),
+            ]
+        )
+        result, _ = self._run(runner, body)
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["count"] == 2
+        assert [s["scope"] for s in out["data"]] == [
+            "consumer_group:one",
+            "consumer_group:two",
+        ]
+
+    def test_unit_passed_through_verbatim(self, runner, mock_env):
+        body = self._ok([self._series(unit=[None, None])])
+        result, _ = self._run(runner, body)
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"][0]["unit"] == [None, None]
+
+    def test_missing_unit_key(self, runner, mock_env):
+        series = self._series()
+        del series["unit"]
+        result, _ = self._run(runner, self._ok([series]))
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"][0]["unit"] is None
+
+    def test_format_json_emits_raw_response(self, runner, mock_env):
+        body = self._ok([self._series()])
+        result, _ = self._run(runner, body, extra_args=["--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["ok"] is True
+        assert out["data"] == body
+
+    def test_format_jsonl_emits_one_raw_series_per_line(self, runner, mock_env):
+        body = self._ok([self._series(scope="a"), self._series(scope="b")])
+        result, _ = self._run(runner, body, extra_args=["--format", "jsonl"])
+
+        assert result.exit_code == 0, result.output
+        lines = [ln for ln in result.output.splitlines() if ln.strip()]
+        assert len(lines) == 2
+        assert [json.loads(ln)["scope"] for ln in lines] == ["a", "b"]
+
+    def test_body_error_fails_before_jsonl_prints_nothing(self, runner, mock_env):
+        """jsonl must not turn an error into silent success."""
+        body = self._ok([], status="error", error="boom")
+        result, _ = self._run(runner, body, extra_args=["--format", "jsonl"])
+
+        assert result.exit_code != 0
+        assert "boom" in result.output
+
+    def test_epoch_milliseconds_rejected(self, runner, mock_env):
+        """13-digit input is epoch ms; the API answers that with 'Internal error'."""
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                ["query-metrics", "avg:a.b{*}", "--from", "1700000000000"],
+            )
+
+            assert result.exit_code != 0
+            assert "millisecond" in result.output.lower()
+            mock_client.query_timeseries.assert_not_called()
+
+    def test_inverted_window_rejected(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                [
+                    "query-metrics",
+                    "avg:a.b{*}",
+                    "--from",
+                    "1700001200",
+                    "--to",
+                    "1700000000",
+                ],
+            )
+
+            assert result.exit_code != 0
+            mock_client.query_timeseries.assert_not_called()
+
+    def test_default_window_is_relative_and_needs_no_to(self, runner, mock_env):
+        """The shared parser rejects the literal string 'now', so --to must
+        default to None and be filled in from the clock."""
+        with (
+            patch("dd_cli.cli.DatadogClient") as mock_client_class,
+            patch("time.time", return_value=1700003600.0),
+        ):
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.query_timeseries.return_value = self._ok([])
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["query-metrics", "avg:a.b{*}"])
+
+            assert result.exit_code == 0, result.output
+            mock_client.query_timeseries.assert_called_once_with(
+                query="avg:a.b{*}", from_ts=1700000000, to_ts=1700003600
+            )
+
+    def test_api_error_is_reported(self, runner, mock_env):
+        from dd_cli.http import DatadogAPIError
+
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.query_timeseries.side_effect = DatadogAPIError(
+                403, "Forbidden", '{"errors":["Forbidden"]}'
+            )
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["query-metrics", "avg:a.b{*}"])
+
+            assert result.exit_code != 0
+            assert "403" in result.output
+
+
+class TestSearchMetrics:
+    """Tests for the search-metrics command."""
+
+    def _run(self, runner, response, args=("lag",)):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.search_metrics.return_value = response
+            mock_client_class.return_value = mock_client
+            result = runner.invoke(cli, ["search-metrics", *args])
+            return result, mock_client
+
+    def test_lists_matching_metric_names(self, runner, mock_env):
+        response = {"results": {"metrics": ["a.consumer_lag", "b.consumer_lag"]}}
+        result, mock_client = self._run(runner, response)
+
+        assert result.exit_code == 0, result.output
+        mock_client.search_metrics.assert_called_once_with(term="lag")
+        out = json.loads(result.output)
+        assert out["ok"] is True
+        assert out["term"] == "lag"
+        assert out["total"] == 2
+        assert out["count"] == 2
+        assert out["truncated"] is False
+        assert out["data"] == ["a.consumer_lag", "b.consumer_lag"]
+
+    def test_null_metrics_means_no_matches(self, runner, mock_env):
+        """No matches returns metrics: null, not an empty list."""
+        result, _ = self._run(runner, {"results": {"metrics": None}})
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["total"] == 0
+        assert out["count"] == 0
+        assert out["data"] == []
+
+    def test_missing_results_key(self, runner, mock_env):
+        result, _ = self._run(runner, {})
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"] == []
+
+    def test_limit_truncates_but_keeps_total(self, runner, mock_env):
+        """The endpoint is uncapped, so a broad term must not dump everything."""
+        names = [f"metric.{i}" for i in range(500)]
+        result, _ = self._run(
+            runner, {"results": {"metrics": names}}, args=("a", "--limit", "10")
+        )
+
+        out = json.loads(result.stdout)
+        assert out["total"] == 500
+        assert out["count"] == 10
+        assert out["data"] == names[:10]
+        # The cap bit, so the answer is incomplete and says so.
+        assert out["truncated"] is True
+        assert out["truncation_reason"] == "more_available"
+        assert result.exit_code == 3
+
+    def test_default_limit_is_applied(self, runner, mock_env):
+        names = [f"metric.{i}" for i in range(500)]
+        result, _ = self._run(runner, {"results": {"metrics": names}}, args=("a",))
+
+        out = json.loads(result.stdout)
+        assert out["total"] == 500
+        assert out["count"] == 100
+        assert out["truncated"] is True
+
+    def test_api_error_is_reported(self, runner, mock_env):
+        from dd_cli.http import DatadogAPIError
+
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.search_metrics.side_effect = DatadogAPIError(
+                403, "Forbidden", '{"errors":["Forbidden"]}'
+            )
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["search-metrics", "lag"])
+
+            assert result.exit_code != 0
+            envelope = json.loads(result.stdout)
+            assert envelope["ok"] is False
+            assert envelope["data"] is None
+            assert envelope["error"]["status"] == 403

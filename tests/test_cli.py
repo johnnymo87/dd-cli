@@ -2986,3 +2986,50 @@ class TestMonitorOptionFlagCoverage:
             | {"renotify_status", "option"}
         )
         assert dests == handled
+
+
+class TestMetricsClient:
+    """Tests for the metrics methods on DatadogClient.
+
+    These assert at the _request level because the CLI tests patch
+    DatadogClient wholesale, which would otherwise leave the endpoint
+    paths and the epoch-seconds contract completely uncovered.
+    """
+
+    def test_query_timeseries_uses_v1_query_with_epoch_seconds(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
+        try:
+            dd._request = MagicMock(return_value={"status": "ok", "series": []})
+            dd.query_timeseries(
+                query="avg:a.b{*}by{c}",
+                from_ts=1700000000,
+                to_ts=1700001200,
+            )
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v1/query",
+                params={
+                    "query": "avg:a.b{*}by{c}",
+                    "from": 1700000000,
+                    "to": 1700001200,
+                },
+            )
+        finally:
+            dd.close()
+
+    def test_search_metrics_prefixes_term_with_metrics_facet(self):
+        from dd_cli.http import DatadogClient
+
+        dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
+        try:
+            dd._request = MagicMock(return_value={"results": {"metrics": []}})
+            dd.search_metrics(term="consumer_lag")
+            dd._request.assert_called_once_with(
+                "GET",
+                "/api/v1/search",
+                params={"q": "metrics:consumer_lag"},
+            )
+        finally:
+            dd.close()

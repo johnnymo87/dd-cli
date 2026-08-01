@@ -938,6 +938,44 @@ class DatadogClient:
         }
         return self._read("GET", f"/api/v1/slo/{slo_id}/history", params=params)
 
+    # ── Metrics (v1) ────────────────────────────────────────────────
+
+    def query_timeseries(
+        self,
+        *,
+        query: str,
+        from_ts: int,
+        to_ts: int,
+    ) -> dict[str, Any]:
+        """Query a metric timeseries over a time window.
+
+        Note that a query error is reported in the response *body* as
+        ``status: "error"`` with an ``error`` message, under an HTTP 200.
+        Callers must check ``status`` rather than relying on
+        ``DatadogAPIError``.
+
+        Args:
+            query: A Datadog metric query, e.g. 'avg:my.metric{*} by {tag}'
+            from_ts: Start timestamp (epoch seconds, not milliseconds)
+            to_ts: End timestamp (epoch seconds, not milliseconds)
+        """
+        params: dict[str, Any] = {
+            "query": query,
+            "from": from_ts,
+            "to": to_ts,
+        }
+        return self._request("GET", "/api/v1/query", params=params)
+
+    def search_metrics(self, *, term: str) -> dict[str, Any]:
+        """Search metric names for a substring.
+
+        Returns ``{"results": {"metrics": [...]}}``, where ``metrics`` is
+        ``null`` (not an empty list) when nothing matches. Matching is a
+        literal substring over recently-reporting metrics, so a '.' is not a
+        wildcard and absence is not proof that a metric does not exist.
+        """
+        return self._request("GET", "/api/v1/search", params={"q": f"metrics:{term}"})
+
     # ── Workflows (v2) ──────────────────────────────────────────────
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:

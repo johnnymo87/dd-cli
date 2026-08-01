@@ -18,7 +18,7 @@ dd-cli query-metrics 'avg:system.cpu.user{*}'
 dd-cli query-metrics 'avg:system.cpu.user{*}' --from 1700000000 --to 1700001200
 
 # Raw points for scripting
-dd-cli query-metrics 'avg:system.cpu.user{*}' --format json | jq '.series[0].pointlist'
+dd-cli query-metrics 'avg:system.cpu.user{*}' --format json | jq '.data.series[0].pointlist'
 ```
 
 ### query-metrics Options
@@ -33,18 +33,24 @@ dd-cli query-metrics 'avg:system.cpu.user{*}' --format json | jq '.series[0].poi
 
 ### summary Response
 
+Rides the standard output envelope (`ok`, `schema_version`, `count`,
+`truncated`, `data`), so a failure is never readable as an empty result.
+
 | Field | Description |
 | --- | --- |
-| `count` | Number of series returned |
+| `count` | Number of series returned (`null` if the request failed) |
 | `note` | Present only when the result needs explaining (see below) |
-| `series[].scope` | The tag scope of the series (e.g. `consumer_group:example`) |
-| `series[].points` | Total points in the window |
-| `series[].non_null_points` | How many of those points had a value |
-| `series[].first` / `last` | First and last **non-null** values |
-| `series[].last_ts` | Epoch **ms** of the last non-null point |
-| `series[].min` / `max` / `avg` | Aggregates over non-null, finite points |
-| `series[].interval` | Seconds per point (the rollup granularity in use) |
-| `series[].unit` | Raw unit array from the API |
+| `data[].scope` | The tag scope of the series (e.g. `consumer_group:example`) |
+| `data[].points` | Total points in the window |
+| `data[].non_null_points` | How many of those points had a value |
+| `data[].first` / `last` | First and last **non-null** values |
+| `data[].last_ts` | Epoch **ms** of the last non-null point |
+| `data[].min` / `max` / `avg` | Aggregates over non-null, finite points |
+| `data[].interval` | Seconds per point (the rollup granularity in use) |
+| `data[].unit` | Raw unit array from the API |
+
+`--format json` puts the raw API response under `data`, so raw points are at
+`.data.series[0].pointlist`.
 
 `last_ts` is the field that separates "the value is zero right now" from
 "nothing has reported for five minutes". Check it before concluding a deploy
@@ -61,6 +67,12 @@ dd-cli search-metrics consumer --limit 50
 | --- | --- | --- |
 | `TERM` | (required) | Literal substring to match against metric names |
 | `--limit` | `100` | Max names to print (`total` still reports all matches) |
+| `--on-truncation` | `exit3` | What to do when the cap bit: `exit3`, `warn`, or `error` |
+
+The endpoint returns every match, so hitting `--limit` marks the result
+`truncated` with reason `more_available` and exits **3**. That is a complete
+command with an incomplete answer, not a failure -- but it is not a total
+either, which is what `total` is for.
 
 ## Traps
 
@@ -123,7 +135,9 @@ metric exists but is quiet" -- that case returns zero series instead.
   unactionable `Internal error`.
 - **Errors arrive as HTTP 200**: a malformed query returns `200` with
   `status: "error"` and an `error` message in the body. `query-metrics`
-  checks this and exits non-zero, so it is safe to use in a scripted check.
+  checks this and fails through the same envelope as a transport error --
+  `ok: false`, `count: null`, non-zero exit -- so a scripted check cannot
+  read a broken query as "no data".
 
 ## Common Patterns
 
@@ -144,5 +158,5 @@ dd-cli query-metrics 'avg:kafka.consumer_lag{*} by {consumer_group}' --from now-
 
 ```bash
 dd-cli query-metrics 'avg:my.metric{*}' --from now-5m \
-  | jq -e '.series[0].max < 100'
+  | jq -e '.data[0].max < 100'
 ```

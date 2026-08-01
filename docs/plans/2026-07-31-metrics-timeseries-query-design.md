@@ -177,6 +177,21 @@ Emits `{term, total, count, data}` with `--limit` (default 100) so a broad term
 cannot dump 20,000 names. `--help` and the skill state the substring, recency,
 and absence-is-not-proof caveats.
 
+### Output contract
+
+Both commands emit the shared envelope from `dd_cli/output.py`: `ok`,
+`schema_version`, `count`, `truncated`, `data`. This matters most for the
+HTTP-200-with-`status: "error"` case, which is routed through the same failure
+envelope as a transport error. A caller reading `.count` cannot distinguish a
+malformed query from a transport failure, and should not have to -- what it
+must not see is `0`.
+
+`search-metrics` treats its own `--limit` as a truncation: the total is known
+exactly, so the envelope carries `truncated: true`,
+`truncation_reason: "more_available"`, and the command exits 3 unless
+`--on-truncation` says otherwise. The printed list is a sample, and `total` is
+the answer to "how many matched".
+
 ### Shared time-parser fix
 
 `_parse_time_to_epoch_s` and `_parse_time_to_epoch_ms` match their `now-N[mhd]`

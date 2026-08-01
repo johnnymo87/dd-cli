@@ -2991,9 +2991,10 @@ class TestMonitorOptionFlagCoverage:
 class TestMetricsClient:
     """Tests for the metrics methods on DatadogClient.
 
-    These assert at the _request level because the CLI tests patch
+    These assert at the _read level because the CLI tests patch
     DatadogClient wholesale, which would otherwise leave the endpoint
-    paths and the epoch-seconds contract completely uncovered.
+    paths, the retry policy, and the epoch-seconds contract completely
+    uncovered.
     """
 
     def test_query_timeseries_uses_v1_query_with_epoch_seconds(self):
@@ -3001,13 +3002,13 @@ class TestMetricsClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
         try:
-            dd._request = MagicMock(return_value={"status": "ok", "series": []})
+            dd._read = MagicMock(return_value={"status": "ok", "series": []})
             dd.query_timeseries(
                 query="avg:a.b{*}by{c}",
                 from_ts=1700000000,
                 to_ts=1700001200,
             )
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v1/query",
                 params={
@@ -3024,9 +3025,9 @@ class TestMetricsClient:
 
         dd = DatadogClient(site="us3.datadoghq.com", pat="ddpat_x")
         try:
-            dd._request = MagicMock(return_value={"results": {"metrics": []}})
+            dd._read = MagicMock(return_value={"results": {"metrics": []}})
             dd.search_metrics(term="consumer_lag")
-            dd._request.assert_called_once_with(
+            dd._read.assert_called_once_with(
                 "GET",
                 "/api/v1/search",
                 params={"q": "metrics:consumer_lag"},
@@ -3107,11 +3108,13 @@ class TestQueryMetrics:
 
         assert result.exit_code == 0, result.output
         out = json.loads(result.output)
+        assert out["ok"] is True
+        assert out["truncated"] is False
         assert out["count"] == 1
         assert out["from"] == 1700000000
         assert out["to"] == 1700001200
         assert out["res_type"] == "time_series"
-        s = out["series"][0]
+        s = out["data"][0]
         assert s["scope"] == "consumer_group:example"
         assert s["metric"] == "a.b"
         assert s["query_index"] == 0
@@ -3139,7 +3142,7 @@ class TestQueryMetrics:
         result, _ = self._run(runner, self._ok([series]))
 
         assert result.exit_code == 0, result.output
-        s = json.loads(result.output)["series"][0]
+        s = json.loads(result.output)["data"][0]
         assert s["first"] == 5.0
         assert s["last"] == 3.0
         assert s["last_ts"] == 1700000040000
@@ -3155,7 +3158,7 @@ class TestQueryMetrics:
 
         assert result.exit_code == 0, result.output
         out = json.loads(result.output)
-        s = out["series"][0]
+        s = out["data"][0]
         assert s["non_null_points"] == 0
         assert s["points"] == 2
         for key in ("first", "last", "last_ts", "min", "max", "avg"):
@@ -3166,7 +3169,7 @@ class TestQueryMetrics:
         result, _ = self._run(runner, self._ok([self._series(pointlist=[])]))
 
         assert result.exit_code == 0, result.output
-        s = json.loads(result.output)["series"][0]
+        s = json.loads(result.output)["data"][0]
         assert s["points"] == 0
         assert s["non_null_points"] == 0
         assert s["max"] is None
@@ -3177,7 +3180,7 @@ class TestQueryMetrics:
         result, _ = self._run(runner, self._ok([series]))
 
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output)["series"][0]["points"] == 0
+        assert json.loads(result.output)["data"][0]["points"] == 0
 
     def test_non_finite_values_are_ignored(self, runner, mock_env):
         series = self._series(
@@ -3190,7 +3193,7 @@ class TestQueryMetrics:
         result, _ = self._run(runner, self._ok([series]))
 
         assert result.exit_code == 0, result.output
-        s = json.loads(result.output)["series"][0]
+        s = json.loads(result.output)["data"][0]
         assert s["non_null_points"] == 1
         assert s["max"] == 4.0
         assert s["min"] == 4.0
@@ -3202,7 +3205,7 @@ class TestQueryMetrics:
         assert result.exit_code == 0, result.output
         out = json.loads(result.output)
         assert out["count"] == 0
-        assert out["series"] == []
+        assert out["data"] == []
         note = out["note"].lower()
         assert "search-metrics" in note
         assert "tag" in note
@@ -3219,6 +3222,11 @@ class TestQueryMetrics:
 
         assert result.exit_code != 0
         assert "Error parsing query" in result.output
+        envelope = json.loads(result.stdout)
+        assert envelope["ok"] is False
+        # Never 0 or []: a failed request observed nothing.
+        assert envelope["count"] is None
+        assert envelope["data"] is None
 
     def test_body_error_without_error_key_falls_back(self, runner, mock_env):
         body = self._ok([], status="error", message="something went wrong")
@@ -3254,7 +3262,7 @@ class TestQueryMetrics:
         result, _ = self._run(runner, self._ok([self._series(pointlist=123)]))
 
         assert result.exit_code == 0, result.output
-        s = json.loads(result.output)["series"][0]
+        s = json.loads(result.output)["data"][0]
         assert s["points"] == 0
         assert s["max"] is None
 
@@ -3264,7 +3272,7 @@ class TestQueryMetrics:
         result, _ = self._run(runner, self._ok([series]))
 
         assert result.exit_code == 0, result.output
-        s = json.loads(result.output)["series"][0]
+        s = json.loads(result.output)["data"][0]
         assert s["last"] == 10.0
         assert s["last_ts"] is None
 
@@ -3292,7 +3300,7 @@ class TestQueryMetrics:
         assert result.exit_code == 0, result.output
         out = json.loads(result.output)
         assert out["count"] == 2
-        assert [s["scope"] for s in out["series"]] == [
+        assert [s["scope"] for s in out["data"]] == [
             "consumer_group:one",
             "consumer_group:two",
         ]
@@ -3302,7 +3310,7 @@ class TestQueryMetrics:
         result, _ = self._run(runner, body)
 
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output)["series"][0]["unit"] == [None, None]
+        assert json.loads(result.output)["data"][0]["unit"] == [None, None]
 
     def test_missing_unit_key(self, runner, mock_env):
         series = self._series()
@@ -3310,14 +3318,16 @@ class TestQueryMetrics:
         result, _ = self._run(runner, self._ok([series]))
 
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output)["series"][0]["unit"] is None
+        assert json.loads(result.output)["data"][0]["unit"] is None
 
     def test_format_json_emits_raw_response(self, runner, mock_env):
         body = self._ok([self._series()])
         result, _ = self._run(runner, body, extra_args=["--format", "json"])
 
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output) == body
+        out = json.loads(result.output)
+        assert out["ok"] is True
+        assert out["data"] == body
 
     def test_format_jsonl_emits_one_raw_series_per_line(self, runner, mock_env):
         body = self._ok([self._series(scope="a"), self._series(scope="b")])
@@ -3433,9 +3443,11 @@ class TestSearchMetrics:
         assert result.exit_code == 0, result.output
         mock_client.search_metrics.assert_called_once_with(term="lag")
         out = json.loads(result.output)
+        assert out["ok"] is True
         assert out["term"] == "lag"
         assert out["total"] == 2
         assert out["count"] == 2
+        assert out["truncated"] is False
         assert out["data"] == ["a.consumer_lag", "b.consumer_lag"]
 
     def test_null_metrics_means_no_matches(self, runner, mock_env):
@@ -3461,20 +3473,23 @@ class TestSearchMetrics:
             runner, {"results": {"metrics": names}}, args=("a", "--limit", "10")
         )
 
-        assert result.exit_code == 0, result.output
-        out = json.loads(result.output)
+        out = json.loads(result.stdout)
         assert out["total"] == 500
         assert out["count"] == 10
         assert out["data"] == names[:10]
+        # The cap bit, so the answer is incomplete and says so.
+        assert out["truncated"] is True
+        assert out["truncation_reason"] == "more_available"
+        assert result.exit_code == 3
 
     def test_default_limit_is_applied(self, runner, mock_env):
         names = [f"metric.{i}" for i in range(500)]
         result, _ = self._run(runner, {"results": {"metrics": names}}, args=("a",))
 
-        assert result.exit_code == 0, result.output
-        out = json.loads(result.output)
+        out = json.loads(result.stdout)
         assert out["total"] == 500
         assert out["count"] == 100
+        assert out["truncated"] is True
 
     def test_api_error_is_reported(self, runner, mock_env):
         from dd_cli.http import DatadogAPIError
@@ -3491,4 +3506,7 @@ class TestSearchMetrics:
             result = runner.invoke(cli, ["search-metrics", "lag"])
 
             assert result.exit_code != 0
-            assert "403" in result.output
+            envelope = json.loads(result.stdout)
+            assert envelope["ok"] is False
+            assert envelope["data"] is None
+            assert envelope["error"]["status"] == 403

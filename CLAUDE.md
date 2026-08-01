@@ -118,18 +118,22 @@ PagerDuty API credentials, so `dd-cli` does not expose them yet.
 | --- | --- | --- |
 | `--from` | `now-1h` | Start time (e.g., `now-20m`, `now-7d`, or epoch seconds) |
 | `--to` | `now` | End time |
-| `--format` | `summary` | Output: `summary`, `json` (raw response), `jsonl` (one raw series per line) |
+| `--format` | `summary` | Output: `summary`, `json` (raw response under `data`), `jsonl` (one raw series per line) |
 | `--timeout` | `30` | Request timeout in seconds |
 
 The `summary` format reports each series by tag scope with `first`, `last`,
-`last_ts`, `min`, `max`, `avg`, and how many of its points were non-null. See
-the **datadog-metrics** skill for the rollup, null, and metric-name traps.
+`last_ts`, `min`, `max`, `avg`, and how many of its points were non-null. A
+query error arrives as HTTP 200 with `status: "error"` in the body; it is
+surfaced through the standard failure envelope (`ok: false`, `count: null`)
+rather than as an empty result. See the **datadog-metrics** skill for the
+rollup, null, and metric-name traps.
 
 ### search-metrics Options
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `--limit` | `100` | Max names to print; `total` still reports every match |
+| `--on-truncation` | `exit3` | What to do when the cap bit: `exit3`, `warn`, `error` |
 | `--timeout` | `15` | Request timeout in seconds |
 
 Matching is a literal substring over recently-reporting metrics, so `.` is not

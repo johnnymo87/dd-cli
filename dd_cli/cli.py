@@ -2979,8 +2979,6 @@ def _summarize_metric_series(series: dict[str, Any]) -> dict[str, Any]:
     points (an empty pointlist, or one that is entirely null) yields null
     aggregates rather than raising.
     """
-    import math
-
     raw_points = series.get("pointlist")
     pointlist = raw_points if isinstance(raw_points, list) else []
     values: list[float] = []
@@ -3055,7 +3053,7 @@ def _metric_query_summary(
     series = data.get("series") or []
     summaries = [_summarize_metric_series(s) for s in series]
 
-    summary: dict[str, Any] = {
+    extra: dict[str, Any] = {
         "query": query,
         "from": from_ts,
         "to": to_ts,
@@ -3064,26 +3062,23 @@ def _metric_query_summary(
 
     message = data.get("message")
     if isinstance(message, str) and message.strip():
-        summary["message"] = message
-
-    summary["count"] = len(summaries)
+        extra["message"] = message
 
     if not summaries:
         # Zero series is ambiguous: a metric that does not exist and a metric
         # whose tag scope or window has no data look identical here.
-        summary["note"] = (
+        extra["note"] = (
             "No series returned. Either the metric name or the tag filter "
             "matches nothing (names are separator-sensitive, so try "
             "'dd-cli search-metrics'), or the time window covers no data."
         )
     elif all(s["non_null_points"] == 0 for s in summaries):
-        summary["note"] = (
+        extra["note"] = (
             "Series were returned but every point is null. This is common "
             "with formula, division, and timeshift queries."
         )
 
-    summary["series"] = summaries
-    return summary
+    return success_envelope(summaries, extra=extra)
 
 
 @cli.command("query-metrics")
@@ -3156,14 +3151,8 @@ def query_metrics_cmd(
       dd-cli query-metrics 'avg:system.cpu.user{*}' --format json | \\
         jq '.series[0].pointlist'
     """
-    import time as time_mod
-
     from_ts = _require_epoch_seconds("--from", _parse_time_to_epoch_s(time_from))
-    to_ts = (
-        _require_epoch_seconds("--to", _parse_time_to_epoch_s(time_to))
-        if time_to
-        else int(time_mod.time())
-    )
+    to_ts = _require_epoch_seconds("--to", _parse_time_to_epoch_s(time_to or "now"))
 
     if from_ts >= to_ts:
         raise click.UsageError(
@@ -3176,24 +3165,25 @@ def query_metrics_cmd(
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     # A query error arrives as HTTP 200 with status=error in the body, so this
     # has to be checked explicitly -- and before the format branch, so that no
-    # output format can turn a failure into a silent, zero-exit no-op.
+    # output format can turn a failure into a silent, zero-exit no-op. It goes
+    # through the same failure envelope as a transport error, because to a
+    # caller reading .count there is no difference between the two.
     status = data.get("status")
     has_error_payload = bool(data.get("error")) or bool(data.get("errors"))
     if (status is not None and status != "ok") or has_error_payload:
-        raise click.ClickException(_metric_query_error(data))
+        _handle_runtime_error(RuntimeError(_metric_query_error(data)))
 
     if output_format == "json":
-        click.echo(json.dumps(data, indent=2))
+        emit(success_envelope(data))
     elif output_format == "jsonl":
         for series in data.get("series") or []:
             click.echo(json.dumps(series))
     else:
-        summary = _metric_query_summary(data, query=query, from_ts=from_ts, to_ts=to_ts)
-        click.echo(json.dumps(summary, indent=2))
+        emit(_metric_query_summary(data, query=query, from_ts=from_ts, to_ts=to_ts))
 
 
 @cli.command("search-metrics")
@@ -3203,8 +3193,9 @@ def query_metrics_cmd(
     type=int,
     default=100,
     show_default=True,
-    help="Max metric names to print (the API itself returns everything).",
+    help="Max metric names to print (the API itself returns every match).",
 )
+@truncation_option
 @click.option(
     "--site",
     envvar="DD_SITE",
@@ -3219,7 +3210,13 @@ def query_metrics_cmd(
     show_default=True,
     help="Request timeout in seconds",
 )
-def search_metrics_cmd(term: str, limit: int, site: str, timeout: float) -> None:
+def search_metrics_cmd(
+    term: str,
+    limit: int,
+    on_truncation: str,
+    site: str,
+    timeout: float,
+) -> None:
     """Find metric names containing TERM.
 
     Useful before writing a query or a monitor, because a metric name guessed
@@ -3243,23 +3240,25 @@ def search_metrics_cmd(term: str, limit: int, site: str, timeout: float) -> None
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:
-        raise click.ClickException(str(e)) from None
+        _handle_runtime_error(e)
 
     # A search with no matches returns metrics: null rather than [].
     names = (data.get("results") or {}).get("metrics") or []
-    shown = names[:limit]
 
-    click.echo(
-        json.dumps(
-            {
-                "term": term,
-                "total": len(names),
-                "count": len(shown),
-                "data": shown,
-            },
-            indent=2,
-        )
+    # The endpoint is uncapped, so --limit is the only thing standing between a
+    # broad term and tens of thousands of lines. That makes the printed list a
+    # partial answer, and the total is known exactly, so say so rather than
+    # letting a caller read count as "this is how many matched".
+    result = PagedResult(items=list(names), pages_fetched=1).limited(
+        limit, REASON_MORE_AVAILABLE
     )
+
+    payload = success_envelope(
+        result.items,
+        result=result,
+        extra={"term": term, "total": len(names)},
+    )
+    finish(result, payload, on_truncation=on_truncation, describe="search-metrics")
 
 
 @cli.command("get-workflow")

@@ -964,7 +964,7 @@ class DatadogClient:
             "from": from_ts,
             "to": to_ts,
         }
-        return self._request("GET", "/api/v1/query", params=params)
+        return self._read("GET", "/api/v1/query", params=params)
 
     def search_metrics(self, *, term: str) -> dict[str, Any]:
         """Search metric names for a substring.
@@ -974,7 +974,7 @@ class DatadogClient:
         literal substring over recently-reporting metrics, so a '.' is not a
         wildcard and absence is not proof that a metric does not exist.
         """
-        return self._request("GET", "/api/v1/search", params={"q": f"metrics:{term}"})
+        return self._read("GET", "/api/v1/search", params={"q": f"metrics:{term}"})
 
     # ── Workflows (v2) ──────────────────────────────────────────────
 

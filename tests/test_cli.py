@@ -3377,3 +3377,84 @@ class TestQueryMetrics:
 
             assert result.exit_code != 0
             assert "403" in result.output
+
+
+class TestSearchMetrics:
+    """Tests for the search-metrics command."""
+
+    def _run(self, runner, response, args=("lag",)):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.search_metrics.return_value = response
+            mock_client_class.return_value = mock_client
+            result = runner.invoke(cli, ["search-metrics", *args])
+            return result, mock_client
+
+    def test_lists_matching_metric_names(self, runner, mock_env):
+        response = {"results": {"metrics": ["a.consumer_lag", "b.consumer_lag"]}}
+        result, mock_client = self._run(runner, response)
+
+        assert result.exit_code == 0, result.output
+        mock_client.search_metrics.assert_called_once_with(term="lag")
+        out = json.loads(result.output)
+        assert out["term"] == "lag"
+        assert out["total"] == 2
+        assert out["count"] == 2
+        assert out["data"] == ["a.consumer_lag", "b.consumer_lag"]
+
+    def test_null_metrics_means_no_matches(self, runner, mock_env):
+        """No matches returns metrics: null, not an empty list."""
+        result, _ = self._run(runner, {"results": {"metrics": None}})
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["total"] == 0
+        assert out["count"] == 0
+        assert out["data"] == []
+
+    def test_missing_results_key(self, runner, mock_env):
+        result, _ = self._run(runner, {})
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"] == []
+
+    def test_limit_truncates_but_keeps_total(self, runner, mock_env):
+        """The endpoint is uncapped, so a broad term must not dump everything."""
+        names = [f"metric.{i}" for i in range(500)]
+        result, _ = self._run(
+            runner, {"results": {"metrics": names}}, args=("a", "--limit", "10")
+        )
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["total"] == 500
+        assert out["count"] == 10
+        assert out["data"] == names[:10]
+
+    def test_default_limit_is_applied(self, runner, mock_env):
+        names = [f"metric.{i}" for i in range(500)]
+        result, _ = self._run(runner, {"results": {"metrics": names}}, args=("a",))
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["total"] == 500
+        assert out["count"] == 100
+
+    def test_api_error_is_reported(self, runner, mock_env):
+        from dd_cli.http import DatadogAPIError
+
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.search_metrics.side_effect = DatadogAPIError(
+                403, "Forbidden", '{"errors":["Forbidden"]}'
+            )
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["search-metrics", "lag"])
+
+            assert result.exit_code != 0
+            assert "403" in result.output

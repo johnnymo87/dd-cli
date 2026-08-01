@@ -3182,6 +3182,72 @@ def query_metrics_cmd(
         click.echo(json.dumps(summary, indent=2))
 
 
+@cli.command("search-metrics")
+@click.argument("term", metavar="TERM")
+@click.option(
+    "--limit",
+    type=int,
+    default=100,
+    show_default=True,
+    help="Max metric names to print (the API itself returns everything).",
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def search_metrics_cmd(term: str, limit: int, site: str, timeout: float) -> None:
+    """Find metric names containing TERM.
+
+    Useful before writing a query or a monitor, because a metric name guessed
+    with the wrong separator matches nothing and a monitor built on it never
+    fires.
+
+    TERM is matched as a literal substring, so '.' is not a wildcard and a
+    dotted guess will not find an underscored name. Search a short distinctive
+    token ('lag') rather than a full guessed name ('kafka.consumer.lag').
+
+    The index only covers recently-reporting metrics, so absence here is not
+    proof that a metric does not exist.
+
+    \b
+    Example:
+        dd-cli search-metrics lag --limit 50
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.search_metrics(term=term)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    # A search with no matches returns metrics: null rather than [].
+    names = (data.get("results") or {}).get("metrics") or []
+    shown = names[:limit]
+
+    click.echo(
+        json.dumps(
+            {
+                "term": term,
+                "total": len(names),
+                "count": len(shown),
+                "data": shown,
+            },
+            indent=2,
+        )
+    )
+
+
 @cli.command("get-workflow")
 @click.argument("workflow_url_or_id", metavar="WORKFLOW")
 @click.option(

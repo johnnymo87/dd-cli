@@ -2956,6 +2956,232 @@ def _parse_time_to_epoch_s(value: str) -> int:
     return int(_parse_relative_seconds(value))
 
 
+# 1e11 epoch seconds is the year 5138, so anything at or above it is a
+# millisecond timestamp that was passed to a seconds-valued flag. The API
+# answers such a window with an unhelpful "Internal error", so catch it here.
+_EPOCH_SECONDS_CEILING = 100_000_000_000
+
+
+def _require_epoch_seconds(flag: str, value: int) -> int:
+    """Reject an epoch-millisecond value passed to a seconds-valued flag."""
+    if value >= _EPOCH_SECONDS_CEILING:
+        raise click.UsageError(
+            f"{flag}={value} looks like epoch milliseconds. This flag takes "
+            "epoch seconds (or a relative time such as now-1h); divide by 1000."
+        )
+    return value
+
+
+def _summarize_metric_series(series: dict[str, Any]) -> dict[str, Any]:
+    """Reduce one timeseries to its scope and a few aggregates.
+
+    Aggregates cover only non-null, finite points. A series with no such
+    points (an empty pointlist, or one that is entirely null) yields null
+    aggregates rather than raising.
+    """
+    import math
+
+    pointlist = series.get("pointlist") or []
+    values: list[float] = []
+    last_ts: int | None = None
+
+    for point in pointlist:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        timestamp, value = point[0], point[1]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if not math.isfinite(value):
+            continue
+        values.append(float(value))
+        if isinstance(timestamp, (int, float)) and math.isfinite(timestamp):
+            last_ts = int(timestamp)
+
+    return {
+        "scope": series.get("scope"),
+        "metric": series.get("metric"),
+        "query_index": series.get("query_index"),
+        # Seconds per point. Datadog rolls long windows up automatically, so
+        # this is what tells you how coarse the aggregates below really are.
+        "interval": series.get("interval"),
+        # Passed through as-is: this can be [unit, null], [null, null], or absent.
+        "unit": series.get("unit"),
+        "points": len(pointlist),
+        "non_null_points": len(values),
+        "first": values[0] if values else None,
+        "last": values[-1] if values else None,
+        # Timestamp (epoch ms) of the last non-null point. Distinguishes
+        # "the value is 0 right now" from "nothing has reported in a while".
+        "last_ts": last_ts,
+        "min": min(values) if values else None,
+        "max": max(values) if values else None,
+        "avg": sum(values) / len(values) if values else None,
+    }
+
+
+def _metric_query_error(data: dict[str, Any]) -> str:
+    """Extract the error text from a failed query response body."""
+    for key in ("error", "message"):
+        text = data.get(key)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return (
+        f"Datadog reported status={data.get('status')!r} with no error text. "
+        f"Response: {json.dumps(data)[:300]}"
+    )
+
+
+def _metric_query_summary(
+    data: dict[str, Any],
+    *,
+    query: str,
+    from_ts: int,
+    to_ts: int,
+) -> dict[str, Any]:
+    """Build the human-scannable summary of a timeseries query response."""
+    series = data.get("series") or []
+    summaries = [_summarize_metric_series(s) for s in series]
+
+    summary: dict[str, Any] = {
+        "query": query,
+        "from": from_ts,
+        "to": to_ts,
+        "res_type": data.get("res_type"),
+    }
+
+    message = data.get("message")
+    if isinstance(message, str) and message.strip():
+        summary["message"] = message
+
+    summary["count"] = len(summaries)
+
+    if not summaries:
+        # Zero series is ambiguous: a metric that does not exist and a metric
+        # whose tag scope or window has no data look identical here.
+        summary["note"] = (
+            "No series returned. Either the metric name or the tag filter "
+            "matches nothing (names are separator-sensitive, so try "
+            "'dd-cli search-metrics'), or the time window covers no data."
+        )
+    elif all(s["non_null_points"] == 0 for s in summaries):
+        summary["note"] = (
+            "Series were returned but every point is null. This is common "
+            "with formula, division, and timeshift queries."
+        )
+
+    summary["series"] = summaries
+    return summary
+
+
+@cli.command("query-metrics")
+@click.argument("query", metavar="QUERY")
+@click.option(
+    "--from",
+    "time_from",
+    default="now-1h",
+    show_default=True,
+    help="Start time (e.g., now-20m, now-1h, or epoch seconds)",
+)
+@click.option(
+    "--to",
+    "time_to",
+    default=None,
+    help="End time (default: now)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+    help=(
+        "Output format. summary: per-series scope plus first/last/min/max/avg "
+        "over the window. json: the raw API response. jsonl: one raw series "
+        "per line, no wrapper."
+    ),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def query_metrics_cmd(
+    query: str,
+    time_from: str,
+    time_to: str | None,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Query a metric timeseries and summarize each series over the window.
+
+    The default summary gives one line-ish object per series: its tag scope
+    plus first/last/min/max/avg over the window, the number of points, and how
+    many of them were non-null. Use --format json for the raw API response.
+
+    Datadog rolls long windows up automatically and averages by default, so
+    'max' over a multi-day window is a max of interval averages and understates
+    short spikes. The 'interval' field shows the granularity in use; add
+    '.rollup(max, 60)' to the query when you need true peaks.
+
+    \b
+    Examples:
+      # Lag per consumer group over the last 20 minutes
+      dd-cli query-metrics 'avg:kafka.consumer_lag{*} by {consumer_group}' \\
+        --from now-20m
+
+      # Raw points for scripting
+      dd-cli query-metrics 'avg:system.cpu.user{*}' --format json | \\
+        jq '.series[0].pointlist'
+    """
+    import time as time_mod
+
+    from_ts = _require_epoch_seconds("--from", _parse_time_to_epoch_s(time_from))
+    to_ts = (
+        _require_epoch_seconds("--to", _parse_time_to_epoch_s(time_to))
+        if time_to
+        else int(time_mod.time())
+    )
+
+    if from_ts >= to_ts:
+        raise click.UsageError(
+            f"Empty time window: --from ({from_ts}) is not before --to ({to_ts})."
+        )
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            data = dd.query_timeseries(query=query, from_ts=from_ts, to_ts=to_ts)
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from None
+
+    # A query error arrives as HTTP 200 with status=error in the body, so this
+    # has to be checked explicitly -- and before the format branch, so that no
+    # output format can turn a failure into a silent, zero-exit no-op.
+    status = data.get("status")
+    if status is not None and status != "ok":
+        raise click.ClickException(_metric_query_error(data))
+
+    if output_format == "json":
+        click.echo(json.dumps(data, indent=2))
+    elif output_format == "jsonl":
+        for series in data.get("series") or []:
+            click.echo(json.dumps(series))
+    else:
+        summary = _metric_query_summary(data, query=query, from_ts=from_ts, to_ts=to_ts)
+        click.echo(json.dumps(summary, indent=2))
+
+
 @cli.command("get-workflow")
 @click.argument("workflow_url_or_id", metavar="WORKFLOW")
 @click.option(

@@ -4,6 +4,7 @@ import email.utils
 import json
 import os
 import random
+import socket
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -33,6 +34,35 @@ _DD_RATELIMIT_HEADERS = (
 # chance to duplicate a create if the limiter sat in front of a server that had
 # already accepted the request.
 _WRITE_MAX_RETRIES = 1
+
+# Resolution failures that will never succeed on a retry: the name does not
+# exist, or the resolver gave an authoritative "no". Notably EAI_AGAIN is NOT
+# here -- it means "temporary failure in name resolution" (resolver down, VPN
+# still coming up), which is exactly the transient case retries exist for.
+_PERMANENT_DNS_ERRNOS = frozenset(
+    code
+    for code in (
+        getattr(socket, name, None) for name in ("EAI_NONAME", "EAI_FAIL", "EAI_NODATA")
+    )
+    if code is not None
+)
+
+
+def _permanent_dns_error(exc: BaseException | None) -> socket.gaierror | None:
+    """Find a permanent ``socket.gaierror`` in an exception's chain.
+
+    httpx does not surface the resolver error directly. The real chain is
+    ``httpx.ConnectError -> __cause__ httpcore.ConnectError -> __context__
+    socket.gaierror``, so both links are walked. Returns ``None`` for a
+    temporary resolution failure, which stays retryable.
+    """
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, socket.gaierror) and exc.errno in _PERMANENT_DNS_ERRNOS:
+            return exc
+        exc = exc.__cause__ or exc.__context__
+    return None
 
 
 def _normalize_site(site: str) -> str:
@@ -237,9 +267,15 @@ class DatadogClient:
         write: bool,
         status: int | None,
         resp: httpx.Response | None,
+        error: httpx.RequestError | None = None,
     ) -> bool:
         if status is None:
-            # Transport error. Safe to repeat only for reads.
+            # A name that does not resolve will not resolve on the next try
+            # either. Retrying only burns the budget and dresses a bad DD_SITE
+            # up as a flaky network.
+            if _permanent_dns_error(error) is not None:
+                return False
+            # Any other transport error. Safe to repeat only for reads.
             return not write
 
         if status == 429:
@@ -302,7 +338,9 @@ class DatadogClient:
                 except json.JSONDecodeError as e:
                     raise RuntimeError(f"Invalid JSON response: {e.msg}") from e
 
-            retryable = self._should_retry(write=write, status=status, resp=resp)
+            retryable = self._should_retry(
+                write=write, status=status, resp=resp, error=transport_error
+            )
             elapsed = self._monotonic() - started
 
             if retryable and attempt <= max_retries:
@@ -331,6 +369,14 @@ class DatadogClient:
             elapsed = self._monotonic() - started
 
             if transport_error is not None:
+                dns_error = _permanent_dns_error(transport_error)
+                if dns_error is not None:
+                    host = self._client.base_url.host
+                    raise RuntimeError(
+                        f"Cannot resolve {host!r} ({dns_error.strerror}). "
+                        "This is a configuration error, not a network blip -- "
+                        "check DD_SITE (e.g. 'us3.datadoghq.com')."
+                    ) from transport_error
                 raise RuntimeError(
                     f"Network error after {attempt} attempt(s): {transport_error}"
                 ) from transport_error

@@ -7,6 +7,7 @@ exercised.
 
 from __future__ import annotations
 
+import socket
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 
@@ -310,6 +311,115 @@ class TestNetworkErrorRetry:
             dd._write("POST", "/api/v1/monitor", json_body={"name": "x"})
 
         assert calls["n"] == 1
+
+
+def dns_failure_handler(errno: int, message: str, *, nested: bool = True):
+    """Handler raising a ConnectError shaped like a real resolution failure.
+
+    httpx does not attach the ``socket.gaierror`` directly: the real chain
+    observed against httpx 0.28 is
+    ``httpx.ConnectError -> __cause__ httpcore.ConnectError -> __context__
+    socket.gaierror``. ``nested=False`` produces the flatter shape in case a
+    future httpx raises the gaierror as the immediate cause.
+    """
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        try:
+            raise socket.gaierror(errno, message)
+        except socket.gaierror as resolver_error:
+            if not nested:
+                raise httpx.ConnectError(
+                    f"[Errno {errno}] {message}", request=request
+                ) from resolver_error
+            # Re-wrap once so the gaierror sits two links down the chain.
+            try:
+                raise OSError(f"[Errno {errno}] {message}")
+            except OSError as inner:
+                raise httpx.ConnectError(
+                    f"[Errno {errno}] {message}", request=request
+                ) from inner
+
+    handler.calls = calls  # type: ignore[attr-defined]
+    return handler
+
+
+class TestDNSFailureRetry:
+    """Permanent name-resolution failures must not burn the retry budget.
+
+    A misconfigured DD_SITE is NXDOMAIN and will never succeed, so retrying it
+    is pure waste and produces an error implying a flaky network rather than a
+    typo. A *temporary* resolution failure is a different animal and must keep
+    retrying.
+    """
+
+    def test_read_does_not_retry_permanent_dns_failure(self):
+        handler = dns_failure_handler(socket.EAI_NONAME, "Name or service not known")
+        dd = make_client(handler)
+
+        with pytest.raises(RuntimeError):
+            dd._read("GET", "/api/v2/thing")
+
+        assert handler.calls["n"] == 1
+
+    def test_read_does_not_retry_permanent_dns_failure_as_direct_cause(self):
+        handler = dns_failure_handler(
+            socket.EAI_NONAME, "Name or service not known", nested=False
+        )
+        dd = make_client(handler)
+
+        with pytest.raises(RuntimeError):
+            dd._read("GET", "/api/v2/thing")
+
+        assert handler.calls["n"] == 1
+
+    def test_read_does_not_retry_nonrecoverable_dns_failure(self):
+        handler = dns_failure_handler(
+            socket.EAI_FAIL, "Non-recoverable failure in name resolution"
+        )
+        dd = make_client(handler)
+
+        with pytest.raises(RuntimeError):
+            dd._read("GET", "/api/v2/thing")
+
+        assert handler.calls["n"] == 1
+
+    def test_read_retries_temporary_dns_failure(self):
+        """EAI_AGAIN is explicitly transient -- a resolver blip, not a typo."""
+        handler = dns_failure_handler(
+            socket.EAI_AGAIN, "Temporary failure in name resolution"
+        )
+        dd = make_client(handler, max_retries=3)
+
+        with pytest.raises(RuntimeError):
+            dd._read("GET", "/api/v2/thing")
+
+        assert handler.calls["n"] == 4
+
+    def test_permanent_dns_failure_message_points_at_the_hostname(self):
+        """The error must accuse the config, not the network."""
+        handler = dns_failure_handler(socket.EAI_NONAME, "Name or service not known")
+        dd = make_client(handler)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            dd._read("GET", "/api/v2/thing")
+
+        msg = str(excinfo.value)
+        assert "api.us3.datadoghq.com" in msg
+        assert "DD_SITE" in msg
+        assert "attempt" not in msg.lower()
+
+    def test_permanent_dns_failure_does_not_report_retries(self):
+        """No on_retry events: nothing was retried, so nothing may be claimed."""
+        events = []
+        handler = dns_failure_handler(socket.EAI_NONAME, "Name or service not known")
+        dd = make_client(handler, on_retry=events.append)
+
+        with pytest.raises(RuntimeError):
+            dd._read("GET", "/api/v2/thing")
+
+        assert events == []
 
 
 class TestRetryReporting:

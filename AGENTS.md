@@ -47,6 +47,8 @@ dd-cli validate
 | `dd-cli list-dashboards` | List dashboards, optionally filtered by title |
 | `dd-cli list-slos` | List SLOs with optional tag filtering |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
+| `dd-cli query-metrics QUERY` | Query a metric timeseries; per-series scope with first/last/min/max/avg |
+| `dd-cli search-metrics TERM` | Find metric names containing TERM |
 | `dd-cli get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
 | `dd-cli search-et-issues QUERY` | Search error tracking issues by service/error type |
 | `dd-cli get-et-issue ID` | Get a single error tracking issue with details |
@@ -68,6 +70,7 @@ Run `dd-cli --help` or `dd-cli <command> --help` for details.
 | [datadog-log-metrics](.opencode/skills/datadog-log-metrics/SKILL.md) | Log-based count metrics (ingestion-time, works with flex tier) |
 | [datadog-monitors](.opencode/skills/datadog-monitors/SKILL.md) | Create, inspect, and update monitors (thresholds, group states, notifications) |
 | [datadog-slos](.opencode/skills/datadog-slos/SKILL.md) | List SLOs, inspect SLI values, error budgets, and threshold history |
+| [datadog-metrics](.opencode/skills/datadog-metrics/SKILL.md) | Query metric timeseries, find metric names, rollup and null-handling traps |
 | [datadog-workflows](.opencode/skills/datadog-workflows/SKILL.md) | Fetch workflow definitions and execution instances |
 | [datadog-error-tracking](.opencode/skills/datadog-error-tracking/SKILL.md) | Search/manage error tracking issues, resolve/ignore states |
 

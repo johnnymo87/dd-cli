@@ -70,6 +70,8 @@ dd-cli get-incident 152 --enrich
 | `dd-cli list-team-notification-rules HANDLE` | List team notification routing rules, including PagerDuty handles |
 | `dd-cli list-slos` | List SLOs with optional tag filtering |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
+| `dd-cli query-metrics QUERY` | Query a metric timeseries; per-series scope with first/last/min/max/avg |
+| `dd-cli search-metrics TERM` | Find metric names containing TERM |
 | `dd-cli get-workflow ID_OR_URL` | Get a workflow definition by ID or URL |
 | `dd-cli search-et-issues QUERY` | Search error tracking issues by service/error type |
 | `dd-cli get-et-issue ID` | Get a single error tracking issue with details |
@@ -110,6 +112,19 @@ PagerDuty API credentials, so `dd-cli` does not expose them yet.
 | `--timeout` | `15` | Request timeout in seconds (increase for flex) |
 | `--format` | `json` | Output: `json`, `jsonl`, `messages` |
 
+### query-metrics Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--from` | `now-1h` | Start time (e.g., `now-20m`, `now-7d`, or epoch seconds) |
+| `--to` | `now` | End time |
+| `--format` | `summary` | Output: `summary`, `json` (raw response), `jsonl` (one raw series per line) |
+| `--timeout` | `30` | Request timeout in seconds |
+
+The `summary` format reports each series by tag scope with `first`, `last`,
+`last_ts`, `min`, `max`, `avg`, and how many of its points were non-null. See
+the **datadog-metrics** skill for the rollup, null, and metric-name traps.
+
 Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 ## Configuration
@@ -130,6 +145,7 @@ These are available as skills in `.claude/skills/` (Claude Code) and `.opencode/
 - **datadog-log-metrics** - Log-based count metrics (ingestion-time, works with flex tier)
 - **datadog-monitors** - Create and inspect monitors (thresholds, group states, Slack notifications)
 - **datadog-slos** - List SLOs, inspect SLI values, error budgets, and threshold history
+- **datadog-metrics** - Query metric timeseries, find metric names, rollup and null-handling traps
 - **datadog-workflows** - Fetch workflow definitions and execution instances
 - **datadog-error-tracking** - Search/manage error tracking issues, resolve/ignore states
 

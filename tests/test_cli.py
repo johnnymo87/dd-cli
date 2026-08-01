@@ -3234,6 +3234,40 @@ class TestQueryMetrics:
         assert result.exit_code != 0
         assert result.output.strip()
 
+    def test_body_errors_list_is_surfaced(self, runner, mock_env):
+        """Some Datadog error bodies carry an 'errors' list instead."""
+        body = self._ok([], status="error", errors=["Query parse error"])
+        result, _ = self._run(runner, body)
+
+        assert result.exit_code != 0
+        assert "Query parse error" in result.output
+        # ...as the message itself, not as part of a raw-body dump.
+        assert "no error text" not in result.output
+
+    def test_error_body_without_status_key_still_fails(self, runner, mock_env):
+        result, _ = self._run(runner, {"error": "boom", "series": []})
+
+        assert result.exit_code != 0
+        assert "boom" in result.output
+
+    def test_non_list_pointlist_does_not_crash(self, runner, mock_env):
+        result, _ = self._run(runner, self._ok([self._series(pointlist=123)]))
+
+        assert result.exit_code == 0, result.output
+        s = json.loads(result.output)["series"][0]
+        assert s["points"] == 0
+        assert s["max"] is None
+
+    def test_bogus_timestamp_does_not_become_last_ts(self, runner, mock_env):
+        """A boolean is an int in Python; it must not pass as a timestamp."""
+        series = self._series(pointlist=[[True, 10.0]])
+        result, _ = self._run(runner, self._ok([series]))
+
+        assert result.exit_code == 0, result.output
+        s = json.loads(result.output)["series"][0]
+        assert s["last"] == 10.0
+        assert s["last_ts"] is None
+
     def test_non_empty_message_is_surfaced(self, runner, mock_env):
         body = self._ok([self._series()], message="results were truncated")
         result, _ = self._run(runner, body)

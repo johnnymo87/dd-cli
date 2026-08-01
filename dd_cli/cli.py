@@ -2981,21 +2981,26 @@ def _summarize_metric_series(series: dict[str, Any]) -> dict[str, Any]:
     """
     import math
 
-    pointlist = series.get("pointlist") or []
+    raw_points = series.get("pointlist")
+    pointlist = raw_points if isinstance(raw_points, list) else []
     values: list[float] = []
     last_ts: int | None = None
+
+    def _number(candidate: Any) -> float | None:
+        # bool is a subclass of int, so it has to be excluded explicitly.
+        if not isinstance(candidate, (int, float)) or isinstance(candidate, bool):
+            return None
+        return float(candidate) if math.isfinite(candidate) else None
 
     for point in pointlist:
         if not isinstance(point, (list, tuple)) or len(point) < 2:
             continue
-        timestamp, value = point[0], point[1]
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        value = _number(point[1])
+        if value is None:
             continue
-        if not math.isfinite(value):
-            continue
-        values.append(float(value))
-        if isinstance(timestamp, (int, float)) and math.isfinite(timestamp):
-            last_ts = int(timestamp)
+        values.append(value)
+        timestamp = _number(point[0])
+        last_ts = int(timestamp) if timestamp is not None else None
 
     return {
         "scope": series.get("scope"),
@@ -3025,6 +3030,14 @@ def _metric_query_error(data: dict[str, Any]) -> str:
         text = data.get(key)
         if isinstance(text, str) and text.strip():
             return text.strip()
+
+    # Some Datadog error bodies use an 'errors' list instead.
+    errors = data.get("errors")
+    if isinstance(errors, list):
+        joined = "; ".join(str(e) for e in errors if str(e).strip())
+        if joined:
+            return joined
+
     return (
         f"Datadog reported status={data.get('status')!r} with no error text. "
         f"Response: {json.dumps(data)[:300]}"
@@ -3169,7 +3182,8 @@ def query_metrics_cmd(
     # has to be checked explicitly -- and before the format branch, so that no
     # output format can turn a failure into a silent, zero-exit no-op.
     status = data.get("status")
-    if status is not None and status != "ok":
+    has_error_payload = bool(data.get("error")) or bool(data.get("errors"))
+    if (status is not None and status != "ok") or has_error_payload:
         raise click.ClickException(_metric_query_error(data))
 
     if output_format == "json":

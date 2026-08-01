@@ -125,6 +125,16 @@ The `summary` format reports each series by tag scope with `first`, `last`,
 `last_ts`, `min`, `max`, `avg`, and how many of its points were non-null. See
 the **datadog-metrics** skill for the rollup, null, and metric-name traps.
 
+### search-metrics Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--limit` | `100` | Max names to print; `total` still reports every match |
+| `--timeout` | `15` | Request timeout in seconds |
+
+Matching is a literal substring over recently-reporting metrics, so `.` is not
+a wildcard and absence is not proof a metric does not exist.
+
 Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 ## Configuration

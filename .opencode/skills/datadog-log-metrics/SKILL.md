@@ -42,6 +42,10 @@ immediately.
 `dd-cli` rejects a bare, non-reserved path **before** sending the request. If
 the path really is a tag key (e.g. `kube_namespace`), pass `--allow-bare-path`.
 
+Reserved names are bare-legal for `--group-by` but NOT for a distribution's
+`--path`: they hold strings, and a distribution needs a number, so
+`--path status` is the same empty-metric failure and is rejected too.
+
 ## CLI Command
 
 ```bash

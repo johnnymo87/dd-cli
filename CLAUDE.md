@@ -164,6 +164,9 @@ attributes and tags are correctly bare, so a small allow-list (`service`,
 `date`, `timestamp`) passes silently -- `--group-by service --group-by env`
 keeps working. Any other bare path needs the explicit `--allow-bare-path`,
 which is the right answer for infrastructure tag keys like `kube_namespace`.
+Those reserved names are allowed bare for `--group-by` only: as a
+distribution's `--path` they are strings, not numbers, and would produce the
+same empty metric, so they are rejected there too.
 Rejection is preferred over auto-prefixing because auto-prefixing would rewrite
 a caller's intent for the one class of path (tag keys) that dd-cli cannot
 distinguish from a custom attribute.

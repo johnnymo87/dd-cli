@@ -175,15 +175,42 @@ def _bare_path_error(path: str, *, kind: str) -> LogMetricPathError:
     )
 
 
-def validate_log_metric_path(path: str, *, kind: str, allow_bare: bool = False) -> None:
+def validate_log_metric_path(
+    path: str,
+    *,
+    kind: str,
+    allow_bare: bool = False,
+    allow_reserved: bool = True,
+) -> None:
     """Reject a path that would silently yield an empty metric.
 
     ``kind`` is used in the message: ``"compute path"`` or ``"group_by path"``.
+    ``allow_reserved`` is False for a distribution's compute path, where a
+    reserved attribute is legal syntax but the wrong kind of value.
     """
-    if not path:
-        raise LogMetricPathError(f"Log-metric {kind} must not be empty.")
-    if path.startswith("@") or allow_bare or path in RESERVED_LOG_PATHS:
+    if not path or path == "@":
+        raise LogMetricPathError(
+            f"Log-metric {kind} must name an attribute; got {path!r}."
+        )
+    if allow_bare or path.startswith("@"):
         return
+    if path in RESERVED_LOG_PATHS:
+        if allow_reserved:
+            return
+        raise LogMetricPathError(
+            f"Log-metric {kind} '{path}' is a reserved Datadog attribute, "
+            f"which holds a string, not a number.\n"
+            f"\n"
+            f"A distribution measures a numeric value, so Datadog will accept "
+            f"this with 200 OK and then never record a point. Measure an "
+            f"attribute your application logged instead -- those are written "
+            f"with a leading '@' (e.g. '@duration') -- and use group_by "
+            f"(CLI: --group-by {path}) if what you wanted was to split the "
+            f"metric by {path}.\n"
+            f"\n"
+            f"Pass allow_bare_paths=True (CLI flag: --allow-bare-path) to "
+            f"override."
+        )
     raise _bare_path_error(path, kind=kind)
 
 
@@ -215,7 +242,12 @@ def validate_log_metric_spec(
                 "'@duration'). A distribution has nothing to aggregate "
                 "without it."
             )
-        validate_log_metric_path(path, kind="compute path", allow_bare=allow_bare_paths)
+        validate_log_metric_path(
+            path,
+            kind="compute path",
+            allow_bare=allow_bare_paths,
+            allow_reserved=False,
+        )
     else:
         if path:
             raise ValueError(

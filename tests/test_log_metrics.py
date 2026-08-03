@@ -250,6 +250,65 @@ class TestCreateLogMetricValidation:
 
         assert len(seen) == 1
 
+    @pytest.mark.parametrize("reserved", ["service", "status", "env"])
+    def test_reserved_path_rejected_as_distribution_compute_path(self, reserved):
+        """Reserved attributes are strings; a distribution needs a number.
+
+        They are legitimate bare for group_by, but as a compute path they are
+        the same silent-empty-metric failure wearing a different hat.
+        """
+        dd, seen = capture_client()
+
+        with pytest.raises(LogMetricPathError, match="numeric"):
+            dd.create_log_metric(
+                metric_id="a.b",
+                query="service:x",
+                aggregation_type="distribution",
+                path=reserved,
+            )
+
+        assert seen == []
+
+    def test_reserved_compute_path_allowed_with_escape_hatch(self):
+        dd, seen = capture_client()
+
+        dd.create_log_metric(
+            metric_id="a.b",
+            query="service:x",
+            aggregation_type="distribution",
+            path="status",
+            allow_bare_paths=True,
+        )
+
+        assert len(seen) == 1
+
+    def test_lone_at_sign_is_not_a_compute_path(self):
+        """'@' alone names no attribute."""
+        dd, seen = capture_client()
+
+        with pytest.raises(LogMetricPathError):
+            dd.create_log_metric(
+                metric_id="a.b",
+                query="service:x",
+                aggregation_type="distribution",
+                path="@",
+            )
+
+        assert seen == []
+
+    def test_lone_at_sign_is_not_a_group_by_path(self):
+        """'@' alone would also send an empty tag_name."""
+        dd, seen = capture_client()
+
+        with pytest.raises(LogMetricPathError):
+            dd.create_log_metric(
+                metric_id="a.b",
+                query="service:x",
+                group_by=[{"path": "@", "tag_name": ""}],
+            )
+
+        assert seen == []
+
     def test_at_prefixed_paths_always_pass(self):
         dd, seen = capture_client()
 
@@ -373,6 +432,36 @@ class TestCreateLogMetricCli:
 
             assert result.exit_code != 0
             assert "--path" in result.output
+            mock_client.create_log_metric.assert_not_called()
+
+    def test_count_with_path_names_the_flag_not_the_kwarg(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as klass:
+            mock_client = cli_client_mock()
+            klass.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                ["create-log-metric", "a.b", "--query", "q", "--path", "@duration"],
+            )
+
+            assert result.exit_code != 0
+            assert "--path" in result.output
+            assert "--aggregation-type" in result.output
+            assert "compute path" not in result.output
+            mock_client.create_log_metric.assert_not_called()
+
+    def test_count_with_include_percentiles_fails(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as klass:
+            mock_client = cli_client_mock()
+            klass.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                ["create-log-metric", "a.b", "--query", "q", "--include-percentiles"],
+            )
+
+            assert result.exit_code != 0
+            assert "--include-percentiles" in result.output
             mock_client.create_log_metric.assert_not_called()
 
     def test_bare_custom_path_fails_with_actionable_message(self, runner, mock_env):

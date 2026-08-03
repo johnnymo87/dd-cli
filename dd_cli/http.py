@@ -110,6 +110,132 @@ class DatadogAPIError(Exception):
         return base
 
 
+class LogMetricPathError(ValueError):
+    """A log-metric attribute path would silently produce no data.
+
+    Raised *before* any HTTP call. Datadog accepts a bare (``@``-less) custom
+    attribute path with 200 OK and then never emits a point for it, so this is
+    the only layer that can catch the mistake at all.
+    """
+
+
+#: Paths that are correctly written WITHOUT a leading '@'.
+#:
+#: Datadog splits a log's searchable keys into two namespaces: reserved
+#: attributes and tags live at the top level (``service``, ``env``), while
+#: everything the application itself logged lives under ``@`` (``@duration``,
+#: ``@fbm.attention_open``). Only the first namespace may appear bare.
+#:
+#: This set is deliberately small and conservative: it covers Datadog's
+#: reserved attributes plus the handful of tag keys that every org has. Any
+#: other bare path is rejected with an explanation and an escape hatch
+#: (``allow_bare_paths``) rather than guessed at -- see the module docstring
+#: of tests/test_log_metrics.py for why guessing is unacceptable here.
+RESERVED_LOG_PATHS: frozenset[str] = frozenset(
+    {
+        "date",
+        "ddsource",
+        "ddtags",
+        "env",
+        "host",
+        "message",
+        "service",
+        "source",
+        "status",
+        "timestamp",
+        "version",
+    }
+)
+
+
+def _bare_path_error(path: str, *, kind: str) -> LogMetricPathError:
+    """Build the loud, consequence-first error for a bare custom path."""
+    consequence = (
+        "the metric never records a single point"
+        if kind == "compute path"
+        else "every value collapses into one 'N/A' tag bucket"
+    )
+    return LogMetricPathError(
+        f"Log-metric {kind} '{path}' names a custom log attribute but has no "
+        f"leading '@'.\n"
+        f"\n"
+        f"Datadog will ACCEPT this: the API returns 200 OK and creates the "
+        f"metric. It will then silently produce no data forever -- "
+        f"{consequence} -- with no error anywhere, in Datadog or here. The "
+        f"only way to notice is to look at an empty graph days later.\n"
+        f"\n"
+        f"Fix it one of two ways:\n"
+        f"  * write it as '@{path}' -- correct for any attribute your "
+        f"application logged;\n"
+        f"  * pass allow_bare_paths=True (CLI flag: --allow-bare-path) if this "
+        f"really is a tag key or reserved attribute, which are correctly "
+        f"bare.\n"
+        f"\n"
+        f"Recognised-bare paths: {', '.join(sorted(RESERVED_LOG_PATHS))}."
+    )
+
+
+def validate_log_metric_path(path: str, *, kind: str, allow_bare: bool = False) -> None:
+    """Reject a path that would silently yield an empty metric.
+
+    ``kind`` is used in the message: ``"compute path"`` or ``"group_by path"``.
+    """
+    if not path:
+        raise LogMetricPathError(f"Log-metric {kind} must not be empty.")
+    if path.startswith("@") or allow_bare or path in RESERVED_LOG_PATHS:
+        return
+    raise _bare_path_error(path, kind=kind)
+
+
+def validate_log_metric_spec(
+    *,
+    aggregation_type: str,
+    path: str | None = None,
+    include_percentiles: bool | None = None,
+    group_by: list[dict[str, str]] | None = None,
+    allow_bare_paths: bool = False,
+) -> None:
+    """Check every precondition that must hold before the POST is worth making.
+
+    Lives apart from :meth:`DatadogClient.create_log_metric` so the CLI can run
+    the same checks without a client, and so a caller who mocks the client
+    still cannot skip them.
+    """
+    if aggregation_type not in ("count", "distribution"):
+        raise ValueError(
+            f"aggregation_type must be 'count' or 'distribution', "
+            f"got {aggregation_type!r}."
+        )
+
+    if aggregation_type == "distribution":
+        if not path:
+            raise ValueError(
+                "aggregation_type 'distribution' requires a compute path "
+                "naming the numeric log attribute to measure (e.g. "
+                "'@duration'). A distribution has nothing to aggregate "
+                "without it."
+            )
+        validate_log_metric_path(path, kind="compute path", allow_bare=allow_bare_paths)
+    else:
+        if path:
+            raise ValueError(
+                "A compute path is only valid for aggregation_type "
+                "'distribution'; a 'count' metric counts logs and must not "
+                "send one."
+            )
+        if include_percentiles is not None:
+            raise ValueError(
+                "include_percentiles is only valid for aggregation_type 'distribution'."
+            )
+
+    for entry in group_by or []:
+        validate_log_metric_path(
+            entry.get("path", ""),
+            kind="group_by path",
+            allow_bare=allow_bare_paths,
+        )
+
+
 @dataclass
 class RetryEvent:
     """Reported to the ``on_retry`` callback before each retry sleep."""
@@ -650,15 +776,40 @@ class DatadogClient:
         metric_id: str,
         query: str,
         group_by: list[dict[str, str]] | None = None,
+        aggregation_type: str = "count",
+        path: str | None = None,
+        include_percentiles: bool | None = None,
+        allow_bare_paths: bool = False,
     ) -> dict[str, Any]:
-        """Create a log-based count metric.
+        """Create a log-based metric (``count`` or ``distribution``).
 
         Metrics are computed at ingestion time, so they work regardless
         of whether logs land in standard or flex storage tier.
+
+        A ``distribution`` measures a numeric value off each matching log,
+        named by ``path``; ``count`` just counts logs and must not carry a
+        path. Every path (compute and group_by) is validated for the leading
+        ``@`` that a custom attribute requires, because Datadog accepts a bare
+        one and then silently emits nothing. See :func:`validate_log_metric_path`.
+
+        Raises ``ValueError`` (``LogMetricPathError`` for path problems) before
+        any request is sent.
         """
-        attributes: dict[str, Any] = {
-            "compute": {"aggregation_type": "count"},
-        }
+        validate_log_metric_spec(
+            aggregation_type=aggregation_type,
+            path=path,
+            include_percentiles=include_percentiles,
+            group_by=group_by,
+            allow_bare_paths=allow_bare_paths,
+        )
+
+        compute: dict[str, Any] = {"aggregation_type": aggregation_type}
+        if aggregation_type == "distribution":
+            compute["path"] = path
+            if include_percentiles is not None:
+                compute["include_percentiles"] = include_percentiles
+
+        attributes: dict[str, Any] = {"compute": compute}
         if query:
             attributes["filter"] = {"query": query}
         if group_by:

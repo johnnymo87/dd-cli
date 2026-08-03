@@ -56,7 +56,7 @@ dd-cli get-incident 152 --enrich
 | `dd-cli count-logs QUERY` | Count logs, optionally bucketed (`--bucket 1h`) in one invocation |
 | `dd-cli get-incident ID` | Get incident by ID (with optional `--enrich`) |
 | `dd-cli update-incident ID` | Update incident fields |
-| `dd-cli create-log-metric ID` | Create a log-based count metric (works with flex tier) |
+| `dd-cli create-log-metric ID` | Create a log-based metric -- `count` or `distribution` (works with flex tier) |
 | `dd-cli create-monitor` | Create a monitor (metric/query/trace-analytics alert) with full `options` support |
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd-cli list-monitors` | List monitors, filtered by tag and/or name (auto-paginates) |
@@ -139,6 +139,35 @@ rollup, null, and metric-name traps.
 Matching is a literal substring over recently-reporting metrics, so `.` is not
 a wildcard and absence is not proof a metric does not exist.
 
+### create-log-metric Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--query` | required | Log search query (Log Explorer syntax) |
+| `--aggregation-type` | `count` | `count` matching logs, or `distribution` of a numeric value |
+| `--path` | - | Attribute to aggregate; **required** for `distribution`, rejected for `count` |
+| `--include-percentiles/--no-include-percentiles` | unset | p50-p99 aggregations (distribution only) |
+| `--group-by` | - | Attribute path to tag by (repeatable) |
+| `--allow-bare-path` | off | Permit a path with no leading `@` |
+| `--timeout` | `15` | Request timeout in seconds |
+
+**A custom log attribute path must be written with a leading `@`** --
+`@fbm.attention_open`, not `fbm.attention_open`. Datadog accepts the bare form
+with 200 OK and then the metric silently produces no points forever (for
+`--group-by`, every value collapses into one `N/A` bucket). No error appears
+anywhere. That failure mode once cost multiple weeks and produced a false
+"distribution log metrics don't work in this org" conclusion.
+
+dd-cli therefore **refuses** a bare path before making any request. Reserved
+attributes and tags are correctly bare, so a small allow-list (`service`,
+`env`, `host`, `status`, `source`, `version`, `message`, `ddsource`, `ddtags`,
+`date`, `timestamp`) passes silently -- `--group-by service --group-by env`
+keeps working. Any other bare path needs the explicit `--allow-bare-path`,
+which is the right answer for infrastructure tag keys like `kube_namespace`.
+Rejection is preferred over auto-prefixing because auto-prefixing would rewrite
+a caller's intent for the one class of path (tag keys) that dd-cli cannot
+distinguish from a custom attribute.
+
 Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 ## Configuration
@@ -156,7 +185,7 @@ These are available as skills in `.claude/skills/` (Claude Code) and `.opencode/
 - **datadog-auth** - Troubleshoot 401/403 errors, understand keys and regions
 - **datadog-logs** - Log search syntax, storage tiers (flex), pagination
 - **datadog-incidents** - Incident enrichment, update fields, API patterns
-- **datadog-log-metrics** - Log-based count metrics (ingestion-time, works with flex tier)
+- **datadog-log-metrics** - Log-based count and distribution metrics (ingestion-time, works with flex tier; the '@'-prefix trap)
 - **datadog-monitors** - Create and inspect monitors (thresholds, group states, Slack notifications)
 - **datadog-slos** - List SLOs, inspect SLI values, error budgets, and threshold history
 - **datadog-metrics** - Query metric timeseries, find metric names, rollup and null-handling traps

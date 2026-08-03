@@ -36,7 +36,7 @@ dd-cli validate
 | `dd-cli count-logs QUERY` | Count logs, optionally bucketed (`--bucket 1h`) in one invocation |
 | `dd-cli get-incident ID` | Get incident by ID (with optional `--enrich`) |
 | `dd-cli update-incident ID` | Update incident fields |
-| `dd-cli create-log-metric ID` | Create a log-based count metric (works with flex tier) |
+| `dd-cli create-log-metric ID` | Create a log-based metric -- `count` or `distribution` (works with flex tier) |
 | `dd-cli create-monitor` | Create a monitor (metric/query/trace-analytics alert) with full `options` support |
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd-cli list-monitors` | List monitors, filtered by tag and/or name (auto-paginates) |
@@ -67,7 +67,7 @@ Run `dd-cli --help` or `dd-cli <command> --help` for details.
 | [datadog-auth](.opencode/skills/datadog-auth/SKILL.md) | Troubleshoot 401/403 errors, understand keys and regions |
 | [datadog-logs](.opencode/skills/datadog-logs/SKILL.md) | Log search syntax, storage tiers (flex), pagination |
 | [datadog-incidents](.opencode/skills/datadog-incidents/SKILL.md) | Incident enrichment, update fields, API patterns |
-| [datadog-log-metrics](.opencode/skills/datadog-log-metrics/SKILL.md) | Log-based count metrics (ingestion-time, works with flex tier) |
+| [datadog-log-metrics](.opencode/skills/datadog-log-metrics/SKILL.md) | Log-based count and distribution metrics (ingestion-time, works with flex tier; the '@'-prefix trap) |
 | [datadog-monitors](.opencode/skills/datadog-monitors/SKILL.md) | Create, inspect, and update monitors (thresholds, group states, notifications) |
 | [datadog-slos](.opencode/skills/datadog-slos/SKILL.md) | List SLOs, inspect SLI values, error budgets, and threshold history |
 | [datadog-metrics](.opencode/skills/datadog-metrics/SKILL.md) | Query metric timeseries, find metric names, rollup and null-handling traps |

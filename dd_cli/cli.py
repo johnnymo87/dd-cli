@@ -10,7 +10,14 @@ from typing import Any, NamedTuple, NoReturn
 
 import click
 
-from .http import DatadogAPIError, DatadogClient, RetryEvent, env
+from .http import (
+    DatadogAPIError,
+    DatadogClient,
+    LogMetricPathError,
+    RetryEvent,
+    env,
+    validate_log_metric_spec,
+)
 from .output import (
     EXIT_TRUNCATED,
     REASON_MAX_PAGES,
@@ -572,6 +579,22 @@ def _output_logs(result: PagedResult, output_format: str) -> dict[str, Any] | No
     return None
 
 
+# http.py speaks in keyword-argument names; the CLI user typed flags. Rewrite
+# the library's vocabulary so the advice names something they can actually pass.
+_LOG_METRIC_FLAG_NAMES: dict[str, str] = {
+    "aggregation_type": "--aggregation-type",
+    "compute path": "--path",
+    "include_percentiles": "--include-percentiles",
+    "allow_bare_paths=True": "--allow-bare-path",
+}
+
+
+def _log_metric_flag_advice(message: str) -> str:
+    for kwarg, flag in _LOG_METRIC_FLAG_NAMES.items():
+        message = message.replace(kwarg, flag)
+    return message
+
+
 @cli.command("create-log-metric")
 @click.argument("metric_id", metavar="METRIC_ID")
 @click.option(
@@ -589,7 +612,41 @@ def _output_logs(result: PagedResult, output_format: str) -> dict[str, Any] | No
 @click.option(
     "--group-by",
     multiple=True,
-    help="Group by attribute path (repeatable, e.g., --group-by service)",
+    help=(
+        "Group by attribute path (repeatable, e.g., --group-by service). "
+        "Custom log attributes need a leading '@' (e.g. --group-by @topic)"
+    ),
+)
+@click.option(
+    "--aggregation-type",
+    type=click.Choice(["count", "distribution"]),
+    default="count",
+    show_default=True,
+    help="count matching logs, or measure a numeric value as a distribution",
+)
+@click.option(
+    "--path",
+    default=None,
+    help=(
+        "Log attribute to aggregate, required for --aggregation-type "
+        "distribution (e.g. '@duration'). Not valid for count"
+    ),
+)
+@click.option(
+    "--include-percentiles/--no-include-percentiles",
+    "include_percentiles",
+    default=None,
+    help="Include p50/p75/p90/p95/p99 aggregations (distribution only)",
+)
+@click.option(
+    "--allow-bare-path",
+    "allow_bare_paths",
+    is_flag=True,
+    default=False,
+    help=(
+        "Permit a path with no leading '@'. Only for tag keys or reserved "
+        "attributes -- a bare CUSTOM attribute silently yields no data"
+    ),
 )
 @click.option(
     "--timeout",
@@ -603,18 +660,50 @@ def create_log_metric_cmd(
     site: str,
     query: str,
     group_by: tuple[str, ...],
+    aggregation_type: str,
+    path: str | None,
+    include_percentiles: bool | None,
+    allow_bare_paths: bool,
     timeout: float,
 ) -> None:
-    """Create a log-based count metric (computed at ingestion time).
+    """Create a log-based metric: count, or distribution of a numeric value.
 
-    Works with all storage tiers including flex. The metric counts matching
-    logs and is available as a custom metric for dashboards and monitors.
+    Computed at ingestion time, so it works with all storage tiers including
+    flex, and is available as a custom metric for dashboards and monitors.
+
+    A distribution measures a numeric attribute off each matching log and
+    needs --path. Custom log attributes MUST be written with a leading '@'
+    ('@duration', not 'duration'): Datadog accepts a bare path with 200 OK and
+    then silently produces no data forever. dd-cli refuses those up front --
+    use --allow-bare-path if the path really is a tag key or reserved
+    attribute (service, env, host, status, ...).
 
     Example: dd-cli create-log-metric kafka.unknown_topic_errors \\
         --query 'service:my-worker UNKNOWN_TOPIC_OR_PARTITION' \\
         --group-by service --group-by env
+
+    Example: dd-cli create-log-metric fbm.attention_open \\
+        --query 'service:fbm @fbm.attention_open:*' \\
+        --aggregation-type distribution --path '@fbm.attention_open' \\
+        --include-percentiles --group-by service --group-by env
     """
     group_by_list = [{"path": g, "tag_name": g.lstrip("@")} for g in group_by] or None
+
+    # Validate here, not only inside the client: a bad path must never cost a
+    # request, and the failure must read as a usage error rather than an API
+    # error.
+    try:
+        validate_log_metric_spec(
+            aggregation_type=aggregation_type,
+            path=path,
+            include_percentiles=include_percentiles,
+            group_by=group_by_list,
+            allow_bare_paths=allow_bare_paths,
+        )
+    except LogMetricPathError as e:
+        raise click.UsageError(str(e)) from None
+    except ValueError as e:
+        raise click.UsageError(_log_metric_flag_advice(str(e))) from None
 
     try:
         with _get_client(site, timeout=timeout) as dd:
@@ -622,7 +711,15 @@ def create_log_metric_cmd(
                 metric_id=metric_id,
                 query=query,
                 group_by=group_by_list,
+                aggregation_type=aggregation_type,
+                path=path,
+                include_percentiles=include_percentiles,
+                allow_bare_paths=allow_bare_paths,
             )
+    except LogMetricPathError as e:
+        raise click.UsageError(str(e)) from None
+    except ValueError as e:
+        raise click.UsageError(_log_metric_flag_advice(str(e))) from None
     except DatadogAPIError as e:
         _handle_api_error(e)
     except RuntimeError as e:

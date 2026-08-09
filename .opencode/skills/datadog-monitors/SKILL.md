@@ -14,6 +14,11 @@ dd-cli list-monitors --tag managed-by:dd-cli
 # Multiple tags AND together (DD-side comma-join)
 dd-cli list-monitors --tag managed-by:dd-cli --tag team:platform
 
+# The monitor's own tags (--tag) vs the scope it watches (--scope-tag)
+dd-cli list-monitors --tag team:platform          # tagged as owned by the team
+dd-cli list-monitors --scope-tag env:prod         # queries {env:prod}
+dd-cli list-monitors --tag team:platform --scope-tag env:prod   # both (AND)
+
 # Substring name search (server-side, case-insensitive)
 dd-cli list-monitors --name kafka --max-results 50
 
@@ -29,15 +34,34 @@ dd-cli list-monitors --tag team:platform --format json
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--tag` | - | Filter by *monitor's own* tag (repeatable, AND-combined). Not the watched-resource tags. |
+| `--tag` | - | Filter by the monitor's **own** tag (repeatable, AND-combined). Sent as DD's `monitor_tags`. |
+| `--scope-tag` | - | Filter by the **scope the monitor watches** -- a tag inside its query (repeatable, AND-combined). Sent as DD's `tags`. |
 | `--name` | - | Filter by name substring (server-side, case-insensitive) |
-| `--max-results` | `1000` | Cap total results. Auto-pagination stops here even if more pages exist. |
+| `--max-results` | `10000` | Cap total results. Auto-pagination stops here even if more pages exist, and marks the answer truncated (exit 3). |
 | `--format` | `summary` | Output: `summary` (id/name/type/overall_state/tags), `json` (full, wrapped), `jsonl` (full, one per line) |
 | `--timeout` | `15` | Request timeout in seconds |
 
-**Tag flavors gotcha:** `--tag` filters by the monitor's own tags (e.g., `managed-by:dd-cli`, `team:platform`). The Datadog API distinguishes these from `monitor_tags` (tags on the resources the monitor watches, like `env:prod`); the latter is not exposed yet — file an issue if you need it.
+**Tag flavors gotcha — read this before trusting an empty result.** Datadog's
+`GET /api/v1/monitor` takes two tag parameters that answer different questions,
+and this description used to be backwards in both this skill and the CLI:
 
-**Pagination:** auto-paginates 1000 monitors per page until `--max-results` is reached or a short page is returned. With the default cap of 1000, only one API call is made.
+| Parameter | dd-cli flag | Matches |
+| --- | --- | --- |
+| `monitor_tags` | `--tag` | the monitor's **own** tags -- where ownership lives (`team:`, `managed-by:`, `feature:`, `product:`, `domain:`) |
+| `tags` | `--scope-tag` | the **scope** the monitor watches, i.e. tags appearing inside its query (`env:prod`, `service:foo`) |
+
+Until 2026-08-09 `--tag` was wired to `tags`, so every ownership-tag audit
+returned an **empty set that looked exactly like a clean result**. Measured in
+prod at the time: `--tag env:prod` returned 221 monitors, all 221 of which had
+`env:prod` in their *query* but only 191 of which carried it as a tag (one had
+no tags at all); `--tag team:ba-fulfillment` returned 0 while 39 monitors
+carried that tag. **Any conclusion of the form "we checked, nothing matched
+team:X" made with an older dd-cli is worthless — re-run it.**
+
+A tag-filtered run returning 0 now prints a stderr note naming which predicate
+ran, and `--format json`/`summary` carries a `filters` object echoing it.
+
+**Pagination:** auto-paginates 1000 monitors per page until `--max-results` is reached or a short page is returned. The default cap is 10000, i.e. up to 10 API calls.
 
 ### API Details
 

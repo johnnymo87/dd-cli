@@ -924,7 +924,8 @@ class DatadogClient:
     def list_monitors(
         self,
         *,
-        tags: list[str] | None = None,
+        monitor_tags: list[str] | None = None,
+        scope_tags: list[str] | None = None,
         name: str | None = None,
         page: int = 0,
         page_size: int = 1000,
@@ -935,11 +936,25 @@ class DatadogClient:
         Pagination is page-based: pass `page=N` to fetch the (N+1)th page.
         Datadog silently caps `page_size` at 1000.
 
+        ``GET /api/v1/monitor`` takes **two** different tag parameters and they
+        answer different questions. Per Datadog's own API contract, ``tags``
+        filters "by scope" (the tags on the watched resources, e.g.
+        ``host:host0``) while ``monitor_tags`` filters by "service and/or custom
+        tags" -- the monitor's own tag list. Ownership tags (``team:``,
+        ``managed-by:``, ``feature:``) live on the monitor and almost never
+        appear in its query, so sending them as ``tags`` returns an empty set
+        that is indistinguishable from a genuine "nothing there" result. The two
+        parameters are AND-combined when both are sent.
+
+        The kwargs are deliberately named for the predicate rather than for the
+        wire parameter, and there is no ``tags=`` kwarg: a caller that means one
+        and passes the other now fails loudly instead of quietly.
+
         Args:
-            tags: Filter by monitor tags. Multiple values are AND-combined
-                (DD-side comma join). These are the *monitor's own* tags
-                (e.g., 'managed-by:dd-cli'), not the tags on the resources
-                the monitor watches.
+            monitor_tags: Filter by the monitor's *own* tags. Multiple values
+                are AND-combined (DD-side comma join).
+            scope_tags: Filter by the *scope* the monitor watches, i.e. tags
+                appearing in its query. AND-combined the same way.
             name: Substring match on the monitor name (case-insensitive,
                 handled DD-side).
             page: Zero-indexed page number.
@@ -949,8 +964,10 @@ class DatadogClient:
             "page": page,
             "page_size": page_size,
         }
-        if tags:
-            params["tags"] = ",".join(tags)
+        if monitor_tags:
+            params["monitor_tags"] = ",".join(monitor_tags)
+        if scope_tags:
+            params["tags"] = ",".join(scope_tags)
         if name:
             params["name"] = name
         # The v1 list endpoint returns a bare JSON array, not a wrapped object.
@@ -1122,21 +1139,28 @@ class DatadogClient:
     def list_slos(
         self,
         *,
-        tags: str | None = None,
+        tags_query: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> dict[str, Any]:
-        """List SLOs, optionally filtered by tags.
+        """List SLOs, optionally filtered by the SLOs' own tags.
+
+        ``GET /api/v1/slo`` names this parameter ``tags_query``. It has no
+        ``tags`` parameter, and an unknown query parameter is **ignored**
+        rather than rejected -- so sending ``tags`` returned every SLO in the
+        org while looking like a filtered result. That is the same silent class
+        of defect as the monitor ``tags``/``monitor_tags`` confusion, inverted:
+        too much data rather than too little.
 
         Args:
-            tags: Comma-separated tags to filter by
-                (e.g., 'env:prod,team:backend')
+            tags_query: Comma-separated tags to filter by, AND-combined
+                (e.g., 'env:prod,team:backend').
             limit: Max number of SLOs to return
             offset: Pagination offset
         """
         params: dict[str, Any] = {}
-        if tags:
-            params["tags"] = tags
+        if tags_query:
+            params["tags_query"] = tags_query
         if limit is not None:
             params["limit"] = limit
         if offset is not None:

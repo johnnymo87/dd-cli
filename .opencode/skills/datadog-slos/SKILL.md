@@ -22,10 +22,18 @@ dd-cli list-slos --limit 10 --offset 20
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--tags` | - | Comma-separated tags to filter by (e.g., `env:prod,team:backend`) |
-| `--limit` | - | Max number of SLOs to return |
+| `--tags` | - | Comma-separated tags to filter by, AND-combined (e.g., `env:prod,team:backend`). These are the SLO's **own** tags. Sent as DD's `tags_query`. |
+| `--limit` | `1000` | Max number of SLOs to return. Always sent, so a full page is reported as `truncated` (exit 3) instead of passing for a complete answer. |
 | `--offset` | - | Pagination offset |
 | `--timeout` | `15` | Request timeout in seconds |
+
+**`--tags` was a no-op before 2026-08-09.** dd-cli sent it as `tags`, which
+`GET /api/v1/slo` does not define -- and Datadog **ignores** unknown query
+parameters rather than rejecting them. The command therefore returned *every*
+SLO in the org while presenting it as a filtered result (measured: 442 with no
+filter, 442 for `--tags team:ba-fulfillment`, 442 for a deliberately nonsense
+tag). The correct parameter is `tags_query`. Any count taken from an older
+dd-cli `list-slos --tags` is the org-wide total (capped at the page size), not a filtered one.
 
 ### list-slos Response
 
@@ -74,7 +82,7 @@ dd-cli get-slo abc123def456 --from now-1d --to now
 
 ## API Details
 
-- **List**: `GET /api/v1/slo` -- returns all SLOs, supports `tags`, `limit`, `offset` params
+- **List**: `GET /api/v1/slo` -- supports `tags_query`, `limit`, `offset` params. There is **no** `tags` parameter; sending one is silently ignored.
 - **Get**: `GET /api/v1/slo/{slo_id}` -- returns SLO definition
 - **History**: `GET /api/v1/slo/{slo_id}/history` -- returns SLI value, error budget over time range
 - **Auth**: Requires API key + App key

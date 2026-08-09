@@ -150,7 +150,13 @@ class TestListMonitors:
             ]
 
     def test_list_monitors_tag_filter_passed_through(self, runner, mock_env):
-        """Multiple --tag flags are joined with commas (AND semantics)."""
+        """Multiple --tag flags reach the client as monitor_tags.
+
+        This asserts only the plumbing. A mock cannot tell monitor_tags from
+        tags -- it records whatever it is handed -- so the *semantics* are
+        pinned in test_wrong_answers.TestTagFilterMatchesTheMonitorsOwnTags,
+        which drives a fake Datadog through a real transport.
+        """
         with patch("dd_cli.cli.DatadogClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.__enter__ = MagicMock(return_value=mock_client)
@@ -171,7 +177,8 @@ class TestListMonitors:
 
             assert result.exit_code == 0, result.output
             mock_client.list_monitors.assert_called_once_with(
-                tags=["managed-by:dd-cli", "team:platform"],
+                monitor_tags=["managed-by:dd-cli", "team:platform"],
+                scope_tags=None,
                 name=None,
                 page=0,
                 page_size=1000,
@@ -190,7 +197,8 @@ class TestListMonitors:
 
             assert result.exit_code == 0, result.output
             mock_client.list_monitors.assert_called_once_with(
-                tags=None,
+                monitor_tags=None,
+                scope_tags=None,
                 name="kafka",
                 page=0,
                 page_size=1000,

@@ -94,7 +94,9 @@ class _ApiFailure(click.ClickException):
         click.echo(f"dd-cli: {self.message}", err=True)
 
 
-def _handle_api_error(e: DatadogAPIError) -> NoReturn:
+def _handle_api_error(
+    e: DatadogAPIError, *, extra: dict[str, Any] | None = None
+) -> NoReturn:
     """Fail loudly, on stdout as well as stderr, never as an empty result."""
     raise _ApiFailure(
         failure_envelope(
@@ -103,13 +105,16 @@ def _handle_api_error(e: DatadogAPIError) -> NoReturn:
             attempts=e.attempts,
             elapsed_s=e.elapsed_s,
             body=e.response_body,
+            extra=extra,
         ),
         str(e),
     )
 
 
-def _handle_runtime_error(e: Exception) -> NoReturn:
-    raise _ApiFailure(failure_envelope(e), str(e))
+def _handle_runtime_error(
+    e: Exception, *, extra: dict[str, Any] | None = None
+) -> NoReturn:
+    raise _ApiFailure(failure_envelope(e, extra=extra), str(e))
 
 
 def truncation_option(f: Any) -> Any:
@@ -1326,15 +1331,86 @@ def _monitor_summary(monitor: dict[str, Any]) -> dict[str, Any]:
     return {field: monitor.get(field) for field in _MONITOR_SUMMARY_FIELDS}
 
 
+def _reject_empty_tag_values(flag: str, values: tuple[str, ...]) -> None:
+    """Refuse an empty tag value instead of sending an empty filter.
+
+    ``--tag ""`` would serialise to ``monitor_tags=``, which Datadog ignores --
+    returning the whole org while the invocation claims to be filtered.
+    """
+    if any(not v.strip() for v in values):
+        raise click.UsageError(
+            f"{flag} was given an empty value. An empty tag is not a filter: "
+            "Datadog would ignore it and return everything."
+        )
+
+
+def _warn_empty_monitor_filter(
+    monitor_tags: tuple[str, ...],
+    scope_tags: tuple[str, ...],
+    name: str | None,
+) -> None:
+    """Explain an empty filtered result instead of letting it read as clean.
+
+    The note names *every* active filter, because the filters are ANDed and
+    attributing the emptiness to one of them would be a fresh instance of the
+    bug this command was fixed for: a confident claim ("nothing carries
+    team:x") that the observation does not support.
+    """
+    parts: list[str] = []
+    if monitor_tags:
+        parts.append(f"--tag {', '.join(monitor_tags)} (the monitor's OWN tags)")
+    if scope_tags:
+        parts.append(
+            f"--scope-tag {', '.join(scope_tags)} (tags inside the monitor's query)"
+        )
+    if name is not None:
+        parts.append(f"--name {name} (name substring)")
+    if not parts:
+        return
+
+    conjunction = "; ".join(parts)
+    hint = ""
+    if len(parts) > 1:
+        hint = (
+            " These are ANDed, so this says nothing about any one of them "
+            "on its own -- re-run them separately to find out."
+        )
+    elif monitor_tags:
+        hint = (
+            " --tag matches the monitor's own tags; to match the scope a "
+            "monitor watches (tags inside its query), use --scope-tag."
+        )
+    elif scope_tags:
+        hint = (
+            " --scope-tag matches the monitor's query scope; to match the "
+            "monitor's own tags, use --tag."
+        )
+    warn(f"0 monitors match ALL of: {conjunction}.{hint}")
+
+
 @cli.command("list-monitors")
 @click.option(
     "--tag",
-    "tags",
+    "monitor_tags",
     multiple=True,
     help=(
-        "Filter by monitor tag (repeatable, AND-combined). "
+        "Filter by the monitor's OWN tag (repeatable, AND-combined). "
         "E.g., --tag managed-by:dd-cli --tag team:platform. "
-        "These are the monitor's own tags, not tags on the watched resources."
+        "This is where ownership tags live. Sent as Datadog's monitor_tags. "
+        "CHANGED 2026-08-09: this used to match the monitor's query scope, so "
+        "every ownership-tag filter came back empty. That behaviour is now "
+        "--scope-tag; re-run any audit whose emptiness you relied on."
+    ),
+)
+@click.option(
+    "--scope-tag",
+    "scope_tags",
+    multiple=True,
+    help=(
+        "Filter by the SCOPE the monitor watches, i.e. a tag appearing in its "
+        "query (repeatable, AND-combined). E.g., --scope-tag env:prod matches "
+        "monitors querying {env:prod} whether or not they carry that tag. "
+        "Sent as Datadog's tags."
     ),
 )
 @click.option(
@@ -1344,7 +1420,7 @@ def _monitor_summary(monitor: dict[str, Any]) -> dict[str, Any]:
 )
 @click.option(
     "--max-results",
-    type=int,
+    type=click.IntRange(min=1),
     default=10000,
     show_default=True,
     help=(
@@ -1380,7 +1456,8 @@ def _monitor_summary(monitor: dict[str, Any]) -> dict[str, Any]:
 )
 @truncation_option
 def list_monitors_cmd(
-    tags: tuple[str, ...],
+    monitor_tags: tuple[str, ...],
+    scope_tags: tuple[str, ...],
     name: str | None,
     max_results: int,
     output_format: str,
@@ -1390,7 +1467,15 @@ def list_monitors_cmd(
 ) -> None:
     """List monitors, optionally filtered by tag and/or name.
 
-    Auto-paginates through all results up to --max-results (default 1000).
+    Auto-paginates through all results up to --max-results.
+
+    \b
+    Two different tag questions, two different flags:
+      --tag        the monitor's OWN tags -- where ownership lives
+                   (team:, managed-by:, feature:, product:, domain:).
+      --scope-tag  the scope the monitor WATCHES, i.e. tags inside its query.
+    A monitor querying {env:prod} that carries no tags at all matches
+    --scope-tag env:prod and not --tag env:prod. Both may be combined (AND).
 
     \b
     Examples:
@@ -1400,12 +1485,26 @@ def list_monitors_cmd(
       # Monitors for a team, by name substring
       dd-cli list-monitors --tag team:platform --name kafka
 
+      # A team's monitors that watch production
+      dd-cli list-monitors --tag team:platform --scope-tag env:prod
+
       # Bulk dump for jq processing
       dd-cli list-monitors --tag managed-by:dd-cli --format jsonl | \\
         jq 'select(.overall_state == "Alert") | .id'
     """
     page_size = 1000
-    tag_list = list(tags) if tags else None
+    _reject_empty_tag_values("--tag", monitor_tags)
+    _reject_empty_tag_values("--scope-tag", scope_tags)
+    monitor_tag_list = list(monitor_tags) if monitor_tags else None
+    scope_tag_list = list(scope_tags) if scope_tags else None
+    # Built before the request so a FAILED run also carries the question it
+    # was asking. A failure envelope has data: null, so it cannot be misread
+    # as a clean empty set -- but the answer should still name the predicate.
+    filters = {
+        "monitor_tags": list(monitor_tags),
+        "scope_tags": list(scope_tags),
+        "name": name,
+    }
     monitors: list[dict[str, Any]] = []
     truncated = False
     reason: str | None = None
@@ -1416,7 +1515,8 @@ def list_monitors_cmd(
             page = 0
             while True:
                 batch = dd.list_monitors(
-                    tags=tag_list,
+                    monitor_tags=monitor_tag_list,
+                    scope_tags=scope_tag_list,
                     name=name,
                     page=page,
                     page_size=page_size,
@@ -1439,9 +1539,9 @@ def list_monitors_cmd(
 
                 page += 1
     except DatadogAPIError as e:
-        _handle_api_error(e)
+        _handle_api_error(e, extra={"filters": filters})
     except RuntimeError as e:
-        _handle_runtime_error(e)
+        _handle_runtime_error(e, extra={"filters": filters})
 
     result = PagedResult(
         items=monitors,
@@ -1449,17 +1549,30 @@ def list_monitors_cmd(
         truncation_reason=reason,
         pages_fetched=pages,
     )
-    payload = _output_monitors(result, output_format)
+    # Echo the predicate that actually ran. An empty list is the dangerous
+    # output here -- it reads as "nothing there" no matter which question was
+    # asked -- so the answer carries the question with it.
+    if not monitors:
+        _warn_empty_monitor_filter(monitor_tags, scope_tags, name)
+    payload = _output_monitors(result, output_format, filters=filters)
     finish(result, payload, on_truncation=on_truncation, describe="list-monitors")
 
 
-def _output_monitors(result: PagedResult, output_format: str) -> dict[str, Any] | None:
+def _output_monitors(
+    result: PagedResult,
+    output_format: str,
+    *,
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Output monitors in the specified format."""
     monitors = result.items
+    extra = {"filters": filters} if filters is not None else None
     if output_format == "summary":
-        return success_envelope([_monitor_summary(m) for m in monitors], result=result)
+        return success_envelope(
+            [_monitor_summary(m) for m in monitors], result=result, extra=extra
+        )
     if output_format == "json":
-        return success_envelope(monitors, result=result)
+        return success_envelope(monitors, result=result, extra=extra)
 
     for m in monitors:
         click.echo(json.dumps(m))
@@ -2861,9 +2974,23 @@ def update_monitor_cmd(
 @click.option(
     "--tags",
     default=None,
-    help="Comma-separated tags to filter by (e.g., 'env:prod,team:backend')",
+    help=(
+        "Comma-separated tags to filter by, AND-combined "
+        "(e.g., 'env:prod,team:backend'). These are the SLO's own tags. "
+        "Sent as Datadog's tags_query."
+    ),
 )
-@click.option("--limit", type=int, default=None, help="Max number of SLOs to return")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=1000,
+    show_default=True,
+    help=(
+        "Max number of SLOs to return. Always sent explicitly (Datadog's own "
+        "default is also 1000) so that a full page can be reported as "
+        "truncated instead of passing for a complete answer."
+    ),
+)
 @click.option("--offset", type=int, default=None, help="Pagination offset")
 @click.option(
     "--timeout",
@@ -2875,21 +3002,32 @@ def update_monitor_cmd(
 def list_slos_cmd(
     site: str,
     tags: str | None,
-    limit: int | None,
+    limit: int,
     offset: int | None,
     timeout: float,
 ) -> None:
-    """List SLOs with optional tag filtering.
+    """List SLOs, optionally filtered by the SLOs' own tags.
+
+    --tags matches the tags carried by the SLO itself, AND-combined. It is sent
+    as Datadog's `tags_query`; the tool previously sent `tags`, which this
+    endpoint does not define and Datadog therefore ignored, so every "filtered"
+    listing was really the whole org.
 
     Example: dd-cli list-slos --tags 'env:prod,team:backend'
     """
+    filters = {"tags_query": tags, "limit": limit, "offset": offset}
+    if tags is not None and not tags.strip():
+        raise click.UsageError(
+            "--tags was given an empty value. An empty tag is not a filter: "
+            "Datadog would ignore it and return everything."
+        )
     try:
         with _get_client(site, timeout=timeout) as dd:
-            data = dd.list_slos(tags=tags, limit=limit, offset=offset)
+            data = dd.list_slos(tags_query=tags, limit=limit, offset=offset)
     except DatadogAPIError as e:
-        _handle_api_error(e)
+        _handle_api_error(e, extra={"filters": filters})
     except RuntimeError as e:
-        _handle_runtime_error(e)
+        _handle_runtime_error(e, extra={"filters": filters})
 
     # Extract and format a summary table
     slos = data.get("data", [])
@@ -2901,9 +3039,9 @@ def list_slos_cmd(
             )
         )
 
-    # This endpoint is not auto-paginated: an explicit --limit that comes back
-    # exactly full may be page 1 of N, and offset paging cannot tell.
-    hit_limit = limit is not None and len(slos) >= limit
+    # This endpoint is not auto-paginated: a --limit that comes back exactly
+    # full may be page 1 of N, and offset paging cannot tell.
+    hit_limit = len(slos) >= limit
     slo_result = PagedResult(
         items=slos,
         truncated=hit_limit,
@@ -2926,9 +3064,15 @@ def list_slos_cmd(
             }
         )
 
+    if not slos and tags:
+        warn(
+            f"0 SLOs carry ALL of: {tags}. --tags matches the SLO's own tags "
+            "(sent as Datadog's tags_query)."
+        )
+
     finish(
         slo_result,
-        success_envelope(summary, result=slo_result),
+        success_envelope(summary, result=slo_result, extra={"filters": filters}),
         on_truncation="warn",
         describe="list-slos",
     )

@@ -39,13 +39,13 @@ dd-cli validate
 | `dd-cli create-log-metric ID` | Create a log-based metric -- `count` or `distribution` (works with flex tier) |
 | `dd-cli create-monitor` | Create a monitor (metric/query/trace-analytics alert) with full `options` support |
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
-| `dd-cli list-monitors` | List monitors, filtered by tag and/or name (auto-paginates) |
+| `dd-cli list-monitors` | List monitors by the monitor's own tag (`--tag`), the scope it watches (`--scope-tag`), and/or name (auto-paginates) |
 | `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, tags, thresholds and `options` (merge, not clobber) |
 | `dd-cli create-dashboard` | Create a dashboard from a `--spec` JSON body (+ title/tags flags) |
 | `dd-cli get-dashboard ID_OR_URL` | Get a dashboard's full definition by ID or URL |
 | `dd-cli update-dashboard ID_OR_URL` | Update (full replace) a dashboard from a `--spec` JSON body (+ title/tags flags) |
 | `dd-cli list-dashboards` | List dashboards, optionally filtered by title |
-| `dd-cli list-slos` | List SLOs with optional tag filtering |
+| `dd-cli list-slos` | List SLOs, optionally filtered by the SLOs' own tags |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
 | `dd-cli query-metrics QUERY` | Query a metric timeseries; per-series scope with first/last/min/max/avg |
 | `dd-cli search-metrics TERM` | Find metric names containing TERM |
@@ -128,6 +128,32 @@ Page/offset paginators cannot distinguish "exactly full" from "more exists"
 without another request, so the precision lives in `truncation_reason`
 (`more_available`, `max_pages`, `max_results_boundary_unknown`,
 `server_timeout`), not in the boolean.
+
+### A filter aimed at the wrong parameter is an error represented as data
+
+The envelope rules above cover a request that *fails*. The nastier case is a
+request that **succeeds while answering a different question**. `list-monitors
+--tag team:X` sent Datadog's `tags` (which filters by the scope a monitor
+watches) instead of `monitor_tags` (the monitor's own tags), so every
+ownership-tag audit returned `[]` with `ok: true` and exit 0. `list-slos --tags`
+sent a parameter Datadog does not define, and unknown query parameters are
+*ignored*, so it returned the entire org as though filtered. Neither is
+detectable by any check on the output alone.
+
+Rules that follow:
+
+1. **Name the kwarg for the predicate, not for the wire parameter**, and do not
+   offer an ambiguous one. `list_monitors` takes `monitor_tags=` and
+   `scope_tags=`, and has no `tags=`, so a confused caller fails loudly.
+2. **A filter test that mocks the client cannot see this bug.** A `MagicMock`
+   records whichever kwarg it is handed and reports success. Filter semantics
+   must be pinned against a fake server driven through a real transport, and
+   the fixture must contain a record where the two predicates *disagree* --
+   where an object's tags and its query scope coincide, the bug is invisible.
+3. **Echo the predicate back with the answer.** `list-monitors` emits a
+   `filters` object, and a tag-filtered run returning 0 prints a stderr note
+   naming which question was asked. An empty set that cannot say what it
+   searched for is indistinguishable from a clean result.
 
 ### What the envelope does and does not protect
 

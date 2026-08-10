@@ -1,6 +1,6 @@
 ---
 name: datadog-log-metrics
-description: Create log-based count and distribution metrics via API - works with all storage tiers including flex. Use when you need to monitor log patterns but logs are in flex tier (where log monitors don't work), or when you need to measure a numeric value carried on a log line.
+description: Create, list, audit, update and delete log-based count and distribution metrics via API - works with all storage tiers including flex. Use when you need to monitor log patterns but logs are in flex tier (where log monitors don't work), when you need to measure a numeric value carried on a log line, or BEFORE shipping a new log string, to check it against every live metric's quoted anchor phrases.
 ---
 
 # Datadog Log-Based Metrics
@@ -14,7 +14,67 @@ Log monitors (`type: "log alert"`) only work on **Standard Tier indexed logs**. 
 
 This two-step approach works regardless of storage tier.
 
-## The '@' Trap (read this first)
+## The Anchor Collision Trap (read this first)
+
+A quoted phrase in a log-metric filter is matched as a **case-insensitive
+substring**, at **intake**. So any log line anywhere in the org that happens to
+contain another metric's anchor phrase starts feeding that metric's counter.
+Nothing warns anyone: not the service that emitted the line, not the metric's
+owner, not the monitor built on it.
+
+This is measured, not hypothetical (details below are anonymised; the shape and
+the magnitude are real). A service added a log line for an order-*retirement*
+code path, worded "...refusing to reserve inventory...". That happens to contain
+the `"Refusing to reserve inventory"` anchor of an unrelated metric counting a
+*no-op* code path, so **tens of thousands** of retirement events were counted as
+no-ops, in a metric a live monitor alerted on. The string has since been
+reworded, and the old wording is now 0 in 24h while the underlying event still
+runs at its full rate -- but because log metrics are computed at intake and
+never backfill, that metric's history is contaminated permanently.
+
+So check a new log string **before it ships**:
+
+```bash
+dd-cli audit-log-metric-anchors 'Order retired: refusing to reserve inventory for order 123'
+```
+
+```json
+{
+  "ok": true,
+  "count": 1,
+  "checked": {"metrics": 62, "metrics_with_quoted_phrase": 48,
+              "phrases": 59, "distinct_phrases": 45},
+  "positive_control": {"ok": true, "source": "derived_longest_phrase"},
+  "data": [{"metric_id": "orders.reserve_inventory_noop",
+            "phrase": "Refusing to reserve inventory",
+            "direction": "anchor_in_candidate"}]
+}
+```
+
+Two properties make that output worth believing, and both exist because the
+alternative failure is silent:
+
+* **Positive control.** The run also audits a string that MUST hit (by default
+  the longest phrase in the harvest; override with `--positive-control`). If
+  the control misses, the whole run reports `ok: false` and exits non-zero --
+  because a harvest that came back empty and an org with no collisions produce
+  the *same* empty answer.
+* **Denominator.** `checked` reports metrics, phrases and distinct phrases. The
+  real case was 1 hit in 62 filters, a density that survives eyeballing; "0
+  collisions" means nothing without the number of things checked next to it.
+
+Collisions are reported in both directions:
+
+| direction | meaning |
+| --- | --- |
+| `anchor_in_candidate` | an existing anchor occurs inside your string -- shipping it feeds their metric |
+| `candidate_in_anchor` | your string occurs inside an existing anchor -- a metric on your string would eat their events |
+
+`CLAUDE.md` in the fulfillment repo says to derive the metric list from
+`GET /api/v2/logs/config/metrics` and never from a checked-in file, and to
+audit it mechanically. That is what this command is.
+
+## The '@' Trap (read this second)
 
 A path that names a **custom log attribute** must be written with a leading
 `@`:
@@ -46,7 +106,44 @@ Reserved names are bare-legal for `--group-by` but NOT for a distribution's
 `--path`: they hold strings, and a distribution needs a number, so
 `--path status` is the same empty-metric failure and is rejected too.
 
-## CLI Command
+## CLI Commands
+
+| Command | Purpose |
+| --- | --- |
+| `dd-cli list-log-metrics` | Every log metric in the org, with completeness assertion |
+| `dd-cli get-log-metric ID` | One metric, plus its extracted anchor phrases |
+| `dd-cli audit-log-metric-anchors STRING` | Collision check with positive control (see above) |
+| `dd-cli create-log-metric ID` | Create a count or distribution metric |
+| `dd-cli update-log-metric ID` | PATCH filter / group_by / include_percentiles (`--dry-run`) |
+| `dd-cli delete-log-metric ID --yes` | Delete; requires the confirmation flag |
+
+### Completeness: a short harvest reports "clean" just as confidently
+
+`GET /api/v2/logs/config/metrics` is **unpaginated** -- no cursor, no `meta`,
+so nothing in a truncated answer looks truncated. A per-metric fetch loop once
+retrieved **41 of 62** filters and reported "no collisions" with exactly the
+confidence of a complete run.
+
+`list-log-metrics` and `audit-log-metric-anchors` therefore assert that what
+they fetched equals what the org enumerated, id for id, and emit the claim:
+
+```json
+"completeness": {"enumerated": 70, "fetched": 70,
+                 "per_metric_fetches": 70, "asserted_equal": true}
+```
+
+A mismatch is `ok: false` with `data: null` and a non-zero exit -- never a
+short list. The endpoint also 429s readily (a live 70-metric `--detail` run hit
+one); `http.py` retries with backoff and announces the wait on stderr, and the
+assertion still has to pass afterwards.
+
+```bash
+# Cheap: the list already carries every metric's full attributes
+dd-cli list-log-metrics --format json | jq '.completeness'
+
+# Paranoid: also GET each id and check the two views agree (1 request/metric)
+dd-cli list-log-metrics --detail --format json
+```
 
 ```bash
 # Count metric from matching logs
@@ -98,6 +195,46 @@ dd-cli create-log-metric my_service.error_count \
 - The `--query` uses standard Datadog log search syntax (same as Log Explorer)
 - Do NOT include `index:` in the query -- metrics run on the full ingest stream
 
+## Updating a Metric (and why you probably should not)
+
+`PATCH /api/v2/logs/config/metrics/{id}` accepts **exactly three** fields --
+this is `LogsMetricUpdateAttributes` in Datadog's OpenAPI spec, confirmed live
+against us3 on a throwaway metric:
+
+| Field | Notes |
+| --- | --- |
+| `filter.query` | Replaces the query entirely |
+| `group_by` | Replaces the **whole list**; there is no per-entry merge. Send `[]` to clear |
+| `compute.include_percentiles` | Distribution metrics only |
+
+`compute.aggregation_type` and `compute.path` are **not patchable**. A metric
+that needs a different one has to be recreated under a new name. The update
+payload also carries no `id` (only `type` + `attributes`).
+
+Omitted fields are left alone: a PATCH sending only `filter` preserved the
+existing `group_by` (verified live).
+
+**The danger.** A log metric is computed at INTAKE and does not backfill, so:
+
+* an edited filter can never be validated against historical data -- only
+  against logs that have not arrived yet;
+* a mistyped filter produces a permanently empty series, which is
+  indistinguishable from a healthy quiet one. A monitor watching it does not
+  alert. It just stops having anything to say.
+
+So mutating a metric a live monitor depends on is **riskier than creating a
+narrowed metric alongside it** and repointing the monitor only after the new
+metric has produced a real emission. That path is reversible; the PATCH is not.
+
+```bash
+# Always look first
+dd-cli update-log-metric my.metric --query 'service:x "new anchor"' --dry-run
+
+# Then, if you must
+dd-cli update-log-metric my.metric --query 'service:x "new anchor"'
+dd-cli query-metrics 'sum:my.metric{*}.as_count()' --from now-1h   # within the hour
+```
+
 ## Verifying a New Metric Actually Works
 
 The '@' trap means "the API said 200" is not evidence. Confirm points exist:
@@ -129,10 +266,15 @@ dd-cli create-monitor \
 
 ## API Details
 
-- **Endpoint**: `POST /api/v2/logs/config/metrics`
+- **Endpoints**: `GET|POST /api/v2/logs/config/metrics`,
+  `GET|PATCH|DELETE /api/v2/logs/config/metrics/{metric_id}`
 - **Permission**: Requires `logs_generate_metrics`
 - **409 Conflict**: Metric with this ID already exists
-- **No list-all via CLI yet** -- use curl: `GET /api/v2/logs/config/metrics`
+- **404** on GET/PATCH/DELETE of an unknown id, with
+  `not_found(Metric with name '...' not found)`
+- **DELETE answers 204 with an empty body** -- do not parse it as JSON, and note
+  that deletion stops future points without removing emitted history
+- The list endpoint is unpaginated and rate-limits readily (429)
 - `compute` shape: `{aggregation_type, path, include_percentiles}`; `path` and
   `include_percentiles` are only used when `aggregation_type` is `distribution`
 

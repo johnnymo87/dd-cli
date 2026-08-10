@@ -37,6 +37,11 @@ dd-cli validate
 | `dd-cli get-incident ID` | Get incident by ID (with optional `--enrich`) |
 | `dd-cli update-incident ID` | Update incident fields |
 | `dd-cli create-log-metric ID` | Create a log-based metric -- `count` or `distribution` (works with flex tier) |
+| `dd-cli list-log-metrics` | List every log-based metric, asserting the harvest is complete |
+| `dd-cli get-log-metric ID` | Get one log-based metric, with its quoted anchor phrases |
+| `dd-cli audit-log-metric-anchors STRING` | Check a proposed log string against every live metric anchor (positive control + denominator) |
+| `dd-cli update-log-metric ID` | PATCH a log metric filter/group_by/percentiles (`--dry-run`); metrics do NOT backfill |
+| `dd-cli delete-log-metric ID` | Delete a log-based metric (requires `--yes`) |
 | `dd-cli create-monitor` | Create a monitor (metric/query/trace-analytics alert) with full `options` support |
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd-cli list-monitors` | List monitors by the monitor's own tag (`--tag`), the scope it watches (`--scope-tag`), and/or name (auto-paginates) |
@@ -58,6 +63,15 @@ dd-cli validate
 
 Software Catalog commands are read-only. Source-of-truth changes should happen through repository-backed `entity.datadog.yaml` PRs, not through Datadog write APIs.
 
+Log-metric filters match quoted phrases as **case-insensitive substrings at
+intake**, so a new log string containing another metric's anchor silently feeds
+that metric -- and log metrics never backfill, so it cannot be undone. Run
+`audit-log-metric-anchors` on a proposed string *before* it ships; the run
+carries a positive control (a hit that must happen, or the whole audit reports
+`ok: false`) and the denominator it checked against. For the same
+no-backfill reason, prefer creating a narrowed metric alongside a live one over
+`update-log-metric` on the metric a monitor depends on.
+
 Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 ## Skills
@@ -67,7 +81,7 @@ Run `dd-cli --help` or `dd-cli <command> --help` for details.
 | [datadog-auth](.opencode/skills/datadog-auth/SKILL.md) | Troubleshoot 401/403 errors, understand keys and regions |
 | [datadog-logs](.opencode/skills/datadog-logs/SKILL.md) | Log search syntax, storage tiers (flex), pagination |
 | [datadog-incidents](.opencode/skills/datadog-incidents/SKILL.md) | Incident enrichment, update fields, API patterns |
-| [datadog-log-metrics](.opencode/skills/datadog-log-metrics/SKILL.md) | Log-based count and distribution metrics (ingestion-time, works with flex tier; the '@'-prefix trap) |
+| [datadog-log-metrics](.opencode/skills/datadog-log-metrics/SKILL.md) | Log-based metrics: create/list/audit/update/delete, the anchor-collision trap, and the '@'-prefix trap |
 | [datadog-monitors](.opencode/skills/datadog-monitors/SKILL.md) | Create, inspect, and update monitors (thresholds, group states, notifications) |
 | [datadog-slos](.opencode/skills/datadog-slos/SKILL.md) | List SLOs, inspect SLI values, error budgets, and threshold history |
 | [datadog-metrics](.opencode/skills/datadog-metrics/SKILL.md) | Query metric timeseries, find metric names, rollup and null-handling traps |

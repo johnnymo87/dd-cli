@@ -29,6 +29,15 @@ dd-cli query-metrics 'avg:system.cpu.user{*} by {host}' --from now-20m
 # Find a metric name (names are separator-sensitive)
 dd-cli search-metrics cpu.user
 
+# Before shipping a new log string: does it collide with a live log-metric
+# anchor? (Filters match quoted phrases as case-insensitive substrings at
+# intake, and log metrics never backfill, so a collision is permanent.)
+dd-cli audit-log-metric-anchors 'Order retired: refusing to reserve inventory'
+
+# Inspect log-based metrics (the list asserts its own completeness)
+dd-cli list-log-metrics --format json | jq '.completeness'
+dd-cli get-log-metric orders.reserve_inventory_noop
+
 # List Software Catalog services owned by a team
 dd-cli list-catalog-entities --kind service --owner platform-team --include raw_schema
 

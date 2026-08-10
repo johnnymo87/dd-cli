@@ -57,6 +57,11 @@ dd-cli get-incident 152 --enrich
 | `dd-cli get-incident ID` | Get incident by ID (with optional `--enrich`) |
 | `dd-cli update-incident ID` | Update incident fields |
 | `dd-cli create-log-metric ID` | Create a log-based metric -- `count` or `distribution` (works with flex tier) |
+| `dd-cli list-log-metrics` | List every log-based metric, asserting the harvest is complete |
+| `dd-cli get-log-metric ID` | Get one log-based metric, with its quoted anchor phrases |
+| `dd-cli audit-log-metric-anchors STRING` | Check a proposed log string against every live metric anchor (positive control + denominator) |
+| `dd-cli update-log-metric ID` | PATCH a log metric filter/group_by/percentiles (`--dry-run`); metrics do NOT backfill |
+| `dd-cli delete-log-metric ID` | Delete a log-based metric (requires `--yes`) |
 | `dd-cli create-monitor` | Create a monitor (metric/query/trace-analytics alert) with full `options` support |
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd-cli list-monitors` | List monitors by the monitor's own tag (`--tag`), the scope it watches (`--scope-tag`), and/or name (auto-paginates) |
@@ -171,6 +176,73 @@ Rejection is preferred over auto-prefixing because auto-prefixing would rewrite
 a caller's intent for the one class of path (tag keys) that dd-cli cannot
 distinguish from a custom attribute.
 
+### audit-log-metric-anchors: check a log string before you ship it
+
+A quoted phrase in a log-metric filter is matched as a **case-insensitive
+substring**, at **intake**. Any new log line that happens to contain another
+metric's anchor silently starts feeding that metric, and because log metrics
+never backfill, the contamination cannot be undone by rewording later.
+
+That is a measured failure (anonymised here; the shape is real). A log line for
+an order-*retirement* path was worded "...refusing to reserve inventory...",
+which contains the `"Refusing to reserve inventory"` anchor of an unrelated
+metric counting a *no-op* path; tens of thousands of retirement events were
+counted as no-ops, in a metric a live monitor alerted on.
+
+```bash
+dd-cli audit-log-metric-anchors 'Order retired: refusing to reserve inventory'
+```
+
+Collisions are reported in both directions -- `anchor_in_candidate` (your
+string feeds their metric) and `candidate_in_anchor` (a metric on your string
+would eat their events) -- each with the metric id, its full filter query, and
+the offending phrase.
+
+Two output properties do the real work:
+
+* **`positive_control`** -- a string that MUST hit (default: the longest phrase
+  in the harvest; override with `--positive-control`). If it misses, the run is
+  `ok: false` with `data: null` and a non-zero exit. A harvest that came back
+  empty and an org with no collisions produce the *same* empty answer, so
+  without this the command's most confident output is also its least
+  trustworthy.
+* **`checked`** -- metrics, phrases, distinct phrases. The production case was
+  1 hit in 62 filters; "0 collisions" means nothing without its denominator.
+
+### Completeness: `GET /api/v2/logs/config/metrics` is unpaginated
+
+There is no cursor whose absence could prove the answer complete, and the
+endpoint 429s readily. A per-metric fetch loop once retrieved **41 of 62**
+filters and reported "no collisions" exactly as confidently as a complete run.
+
+`list-log-metrics` and `audit-log-metric-anchors` therefore assert that the set
+fetched equals the set enumerated, id for id, and publish the claim as
+`completeness: {enumerated, fetched, per_metric_fetches, asserted_equal}`. A
+mismatch fails the command rather than shortening the answer. `--detail` adds a
+per-metric GET of every id as a second opinion (one request per metric).
+
+### update-log-metric: what PATCH accepts, and why to avoid it
+
+`PATCH /api/v2/logs/config/metrics/{id}` accepts exactly three fields --
+`filter.query`, `group_by`, and `compute.include_percentiles`. Confirmed
+against Datadog's `LogsMetricUpdateAttributes` schema and live on us3 with a
+throwaway metric. `aggregation_type` and `compute.path` are fixed at creation.
+`group_by` is replaced wholesale (no per-entry merge); omitted fields are left
+untouched.
+
+**Log metrics are computed at INTAKE and do NOT backfill.** An edited filter can
+therefore never be validated against historical data, and a mistyped filter
+yields a permanently empty series that reads exactly like "healthy" -- a monitor
+on it does not alert, it simply goes quiet. Mutating a metric a live monitor
+depends on is riskier than creating a narrowed metric alongside it and
+repointing the monitor only after the new one has produced a real emission.
+`--dry-run` prints the before/after and sends nothing; a real run re-reads the
+metric afterwards rather than printing its own prediction as an observation.
+
+`delete-log-metric` requires `--yes`, prints the definition it is about to
+delete, and warns that emitted history stays while any monitor on the metric
+goes silently no-data.
+
 Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 ## Configuration
@@ -188,7 +260,7 @@ These are available as skills in `.claude/skills/` (Claude Code) and `.opencode/
 - **datadog-auth** - Troubleshoot 401/403 errors, understand keys and regions
 - **datadog-logs** - Log search syntax, storage tiers (flex), pagination
 - **datadog-incidents** - Incident enrichment, update fields, API patterns
-- **datadog-log-metrics** - Log-based count and distribution metrics (ingestion-time, works with flex tier; the '@'-prefix trap)
+- **datadog-log-metrics** - Log-based metrics: create/list/audit/update/delete, the anchor-collision trap, and the '@'-prefix trap
 - **datadog-monitors** - Create and inspect monitors (thresholds, group states, Slack notifications)
 - **datadog-slos** - List SLOs, inspect SLI values, error budgets, and threshold history
 - **datadog-metrics** - Query metric timeseries, find metric names, rollup and null-handling traps

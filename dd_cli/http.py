@@ -491,6 +491,12 @@ class DatadogClient:
 
             if status is None and transport_error is None:
                 assert resp is not None
+                if resp.status_code in (204, 205):
+                    # "No Content" is the documented success of a DELETE.
+                    # Parsing it would raise and dress a completed delete up as
+                    # a failure -- the inverse of the usual sin, but still a
+                    # wrong answer.
+                    return None
                 try:
                     return resp.json()
                 except json.JSONDecodeError as e:
@@ -858,15 +864,101 @@ class DatadogClient:
 
     def get_log_metric(self, metric_id: str) -> dict[str, Any]:
         """Get a log-based metric by ID."""
-        return self._read("GET", f"/api/v2/logs/config/metrics/{metric_id}")
+        escaped = urllib.parse.quote(metric_id, safe="")
+        return self._read("GET", f"/api/v2/logs/config/metrics/{escaped}")
 
-    def list_log_metrics(self) -> dict[str, Any]:
-        """List all log-based metrics."""
-        return self._read("GET", "/api/v2/logs/config/metrics")
+    def list_log_metrics(self) -> list[dict[str, Any]]:
+        """List every log-based metric in the org.
 
-    def delete_log_metric(self, metric_id: str) -> dict[str, Any]:
-        """Delete a log-based metric by ID."""
-        return self._write("DELETE", f"/api/v2/logs/config/metrics/{metric_id}")
+        ``GET /api/v2/logs/config/metrics`` is unpaginated: it returns the whole
+        set under ``data`` with no cursor and no ``meta``. That is convenient
+        and dangerous in equal measure -- there is no cursor whose absence could
+        prove completeness, so a malformed or partial body has nothing to trip
+        over. Hence the shape check: anything that is not a list of resource
+        objects raises instead of degrading into a short (or empty) list, which
+        would read exactly like "this org has few log metrics".
+        """
+        payload: Any = self._read("GET", "/api/v2/logs/config/metrics")
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                "GET /api/v2/logs/config/metrics expected a JSON object, got "
+                f"{type(payload).__name__}: {str(payload)[:200]}"
+            )
+        if "data" not in payload:
+            raise RuntimeError(
+                "GET /api/v2/logs/config/metrics returned no 'data' key; "
+                "refusing to report an empty metric list. Response: "
+                f"{str(payload)[:200]}"
+            )
+        data = payload["data"]
+        if not isinstance(data, list):
+            raise RuntimeError(
+                "GET /api/v2/logs/config/metrics returned 'data' of type "
+                f"{type(data).__name__}, expected an array: {str(data)[:200]}"
+            )
+        return data
+
+    def update_log_metric(
+        self,
+        metric_id: str,
+        *,
+        query: str | None = None,
+        group_by: list[dict[str, str]] | None = None,
+        include_percentiles: bool | None = None,
+        allow_bare_paths: bool = False,
+    ) -> dict[str, Any]:
+        """Update a log-based metric (PATCH /api/v2/logs/config/metrics/{id}).
+
+        Datadog's ``LogsMetricUpdateAttributes`` accepts exactly three things:
+        ``filter.query``, ``group_by``, and ``compute.include_percentiles``.
+        There is deliberately no way to change ``compute.aggregation_type`` or
+        ``compute.path`` -- those are fixed at creation, and a metric that needs
+        a different one has to be recreated under a new name.
+
+        ``group_by`` is sent whole and replaces the existing list; there is no
+        per-entry merge. Pass ``[]`` to clear it.
+
+        A log metric is computed at INTAKE and never backfills, so a changed
+        filter can only be judged against data that has not arrived yet. See
+        the CLI command's help for what that means in practice.
+        """
+        attributes: dict[str, Any] = {}
+        if query is not None:
+            attributes["filter"] = {"query": query}
+        if group_by is not None:
+            for entry in group_by:
+                validate_log_metric_path(
+                    entry.get("path", ""),
+                    kind="group_by path",
+                    allow_bare=allow_bare_paths,
+                )
+            attributes["group_by"] = group_by
+        if include_percentiles is not None:
+            attributes["compute"] = {"include_percentiles": include_percentiles}
+
+        if not attributes:
+            raise ValueError(
+                "update_log_metric was given nothing to change. Datadog's PATCH "
+                "accepts only filter.query, group_by, and "
+                "compute.include_percentiles; an empty request would report "
+                "success while changing nothing."
+            )
+
+        payload = {"data": {"type": "logs_metrics", "attributes": attributes}}
+        escaped = urllib.parse.quote(metric_id, safe="")
+        return self._write(
+            "PATCH", f"/api/v2/logs/config/metrics/{escaped}", json_body=payload
+        )
+
+    def delete_log_metric(self, metric_id: str) -> dict[str, Any] | None:
+        """Delete a log-based metric by ID.
+
+        Datadog answers 204 with no body, so a successful delete returns None.
+        Deletion stops future points; it does not remove the points the metric
+        already emitted.
+        """
+        escaped = urllib.parse.quote(metric_id, safe="")
+        return self._write("DELETE", f"/api/v2/logs/config/metrics/{escaped}")
 
     # ── Monitors (v1) ───────────────────────────────────────────────
 

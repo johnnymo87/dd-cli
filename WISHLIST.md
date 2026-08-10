@@ -16,6 +16,19 @@ Implemented in v0.3.0. Use `--max-results 50` with `--all-pages`.
 
 Implemented in v0.3.0. Use `--format jsonl` or `--format messages`.
 
+### ~~7. Read/audit log-based metrics, not just create them~~ ✅
+
+`create-log-metric` existed with no way to list, get, update, audit or delete.
+Shipped as `list-log-metrics`, `get-log-metric`,
+`audit-log-metric-anchors`, `update-log-metric` and `delete-log-metric`.
+
+The audit is the point. Log-metric filters match quoted phrases as
+case-insensitive substrings *at intake*, so a new log string containing another
+metric's anchor silently feeds that metric -- tens of thousands of events were
+counted under an unrelated metric before anyone noticed, and metrics do not
+backfill, so the history stays wrong. Doing that audit by hand was an
+instruction in a downstream repo's CLAUDE.md that dd-cli could not serve.
+
 ## Medium Priority
 
 ### 2. Progress indicator for slow queries -- partially addressed

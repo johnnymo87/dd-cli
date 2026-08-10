@@ -10,12 +10,20 @@ from typing import Any, NamedTuple, NoReturn
 
 import click
 
+from .anchors import (
+    Anchor,
+    collision_direction,
+    extract_quoted_phrases,
+    find_collisions,
+    harvest_anchors,
+)
 from .http import (
     DatadogAPIError,
     DatadogClient,
     LogMetricPathError,
     RetryEvent,
     env,
+    validate_log_metric_path,
     validate_log_metric_spec,
 )
 from .output import (
@@ -731,6 +739,833 @@ def create_log_metric_cmd(
         _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
+
+
+# ── Reading log metrics (list / get / audit) ────────────────────────────
+#
+# The documented trap for everything below is a fetch loop that quietly comes
+# back short. A per-metric enumeration once retrieved 41 of 62 filters and
+# reported "no anchor collisions" with exactly the confidence of a complete
+# run. Every read path here therefore asserts that what it fetched matches what
+# the org enumerated, and fails loudly instead of answering from a subset.
+
+
+class LogMetricHarvest(NamedTuple):
+    """Every log metric in the org, plus proof the harvest was complete."""
+
+    metrics: list[dict[str, Any]]
+    enumerated_ids: list[str]
+    detail_fetched: int
+
+
+class IncompleteHarvest(RuntimeError):
+    """The set fetched does not match the set the org enumerated."""
+
+
+def _harvest_log_metrics(
+    dd: DatadogClient, *, detail: bool = False
+) -> LogMetricHarvest:
+    """Fetch all log metrics, refusing to return a set it cannot vouch for.
+
+    ``GET /api/v2/logs/config/metrics`` already returns each metric's full
+    attributes, so ``detail`` (a per-metric GET of every id) is off by default:
+    it costs one request per metric against an endpoint that rate-limits
+    readily, and buys nothing but a second opinion. When it is on, the second
+    opinion is checked -- id for id, not merely counted -- because the failure
+    this guards against is a loop that ends early, and a loop that ends early
+    still returns a perfectly well-formed list.
+    """
+    listed = dd.list_log_metrics()
+
+    enumerated_ids: list[str] = []
+    for entry in listed:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            raise IncompleteHarvest(
+                "a log-metric record came back with no 'id'; refusing to audit "
+                f"an unidentifiable set. Record: {str(entry)[:200]}"
+            )
+        enumerated_ids.append(str(entry["id"]))
+
+    duplicates = sorted({i for i in enumerated_ids if enumerated_ids.count(i) > 1})
+    if duplicates:
+        raise IncompleteHarvest(
+            "the log-metric list contained duplicate ids "
+            f"({', '.join(duplicates)}); a count-based completeness check "
+            "cannot be trusted against it."
+        )
+
+    if not detail:
+        return LogMetricHarvest(
+            metrics=listed, enumerated_ids=enumerated_ids, detail_fetched=0
+        )
+
+    fetched: list[dict[str, Any]] = []
+    for metric_id in enumerated_ids:
+        # No try/except here on purpose. Swallowing a per-metric failure is
+        # precisely how 41-of-62 happened: the loop kept going, the answer kept
+        # its shape, and nothing in the output said a word about it.
+        payload = dd.get_log_metric(metric_id)
+        data = (payload or {}).get("data")
+        if not isinstance(data, dict) or not data.get("id"):
+            raise IncompleteHarvest(
+                f"GET of log metric {metric_id!r} returned no usable 'data'; "
+                f"refusing to audit a partial set. Response: {str(payload)[:200]}"
+            )
+        fetched.append(data)
+
+    fetched_ids = [str(m["id"]) for m in fetched]
+    if sorted(fetched_ids) != sorted(enumerated_ids):
+        missing = sorted(set(enumerated_ids) - set(fetched_ids))
+        unexpected = sorted(set(fetched_ids) - set(enumerated_ids))
+        raise IncompleteHarvest(
+            f"fetched {len(fetched_ids)} of {len(enumerated_ids)} enumerated "
+            f"log metrics. Missing: {missing or 'none'}. Unexpected: "
+            f"{unexpected or 'none'}. A short harvest reports 'no collisions' "
+            "exactly as confidently as a complete one, so this run is failed "
+            "rather than answered."
+        )
+
+    return LogMetricHarvest(
+        metrics=fetched, enumerated_ids=enumerated_ids, detail_fetched=len(fetched)
+    )
+
+
+def _completeness(harvest: LogMetricHarvest) -> dict[str, Any]:
+    """The completeness claim, spelled out in the envelope."""
+    return {
+        "enumerated": len(harvest.enumerated_ids),
+        "fetched": len(harvest.metrics),
+        "per_metric_fetches": harvest.detail_fetched,
+        "asserted_equal": True,
+    }
+
+
+def _log_metric_summary(metric: dict[str, Any]) -> dict[str, Any]:
+    attrs = metric.get("attributes") or {}
+    compute = attrs.get("compute") or {}
+    query = (attrs.get("filter") or {}).get("query") or ""
+    return {
+        "id": metric.get("id"),
+        "aggregation_type": compute.get("aggregation_type"),
+        "path": compute.get("path"),
+        "include_percentiles": compute.get("include_percentiles"),
+        "query": query,
+        "group_by": [g.get("path") for g in (attrs.get("group_by") or [])],
+        "quoted_phrases": extract_quoted_phrases(query),
+    }
+
+
+@cli.command("list-log-metrics")
+@click.option(
+    "--contains",
+    default=None,
+    help=(
+        "Keep only metrics whose id or filter query contains this substring "
+        "(case-insensitive, applied client-side after the full fetch)."
+    ),
+)
+@click.option(
+    "--detail",
+    is_flag=True,
+    default=False,
+    help=(
+        "Additionally GET each metric individually and assert the two views "
+        "agree. Costs one request per metric; the list already carries full "
+        "attributes, so this is a second opinion, not a completeness fix."
+    ),
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+    help=(
+        "summary: {id, aggregation_type, path, query, group_by, "
+        "quoted_phrases} per metric. json: full resource objects. jsonl: one "
+        "full resource per line, no wrapper."
+    ),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def list_log_metrics_cmd(
+    contains: str | None,
+    detail: bool,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """List every log-based metric in the org.
+
+    The endpoint is unpaginated, so there is no cursor whose absence could
+    prove the answer complete. dd-cli therefore checks the shape of the
+    response and, with --detail, that a per-metric fetch of every enumerated id
+    returns exactly that set -- a fetch loop that ends early is the documented
+    way this audit goes quietly wrong.
+
+    \b
+    Examples:
+      dd-cli list-log-metrics
+      dd-cli list-log-metrics --contains fulfillment --format json
+      dd-cli list-log-metrics --detail | jq '.completeness'
+    """
+    filters = {"contains": contains, "detail": detail}
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            harvest = _harvest_log_metrics(dd, detail=detail)
+    except DatadogAPIError as e:
+        _handle_api_error(e, extra={"filters": filters})
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra={"filters": filters})
+
+    metrics = harvest.metrics
+    if contains:
+        needle = contains.lower()
+        metrics = [
+            m
+            for m in metrics
+            if needle in str(m.get("id", "")).lower()
+            or needle
+            in str(
+                ((m.get("attributes") or {}).get("filter") or {}).get("query") or ""
+            ).lower()
+        ]
+        if not metrics:
+            warn(
+                f"0 of {len(harvest.metrics)} log metrics match --contains "
+                f"{contains!r} (matched against the metric id and its filter "
+                "query). The fetch itself was complete."
+            )
+
+    extra = {
+        "filters": filters,
+        "completeness": _completeness(harvest),
+        "matched": len(metrics),
+    }
+
+    if output_format == "jsonl":
+        for metric in metrics:
+            click.echo(json.dumps(metric))
+        warn(
+            f"count={len(metrics)} of {len(harvest.enumerated_ids)} enumerated; "
+            "use --format json for the machine-readable envelope."
+        )
+        return
+
+    data = (
+        metrics
+        if output_format == "json"
+        else [_log_metric_summary(m) for m in metrics]
+    )
+    emit(success_envelope(data, extra=extra))
+
+
+@cli.command("get-log-metric")
+@click.argument("metric_id", metavar="METRIC_ID")
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def get_log_metric_cmd(metric_id: str, site: str, timeout: float) -> None:
+    """Get one log-based metric by ID, with its quoted anchor phrases.
+
+    The anchor phrases are pulled out of the filter query because they are the
+    part with blast radius: Datadog matches them as case-insensitive substrings
+    at intake, so any log line that happens to contain one feeds this metric.
+
+    Example: dd-cli get-log-metric orders.reserve_inventory_noop
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            payload = dd.get_log_metric(metric_id)
+    except DatadogAPIError as e:
+        _handle_api_error(e, extra={"metric_id": metric_id})
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra={"metric_id": metric_id})
+
+    data = (payload or {}).get("data")
+    if not isinstance(data, dict):
+        _handle_runtime_error(
+            RuntimeError(
+                f"GET of log metric {metric_id!r} returned no 'data' object: "
+                f"{str(payload)[:200]}"
+            ),
+            extra={"metric_id": metric_id},
+        )
+
+    query = ((data.get("attributes") or {}).get("filter") or {}).get("query") or ""
+    emit(
+        success_envelope(
+            data,
+            extra={
+                "metric_id": metric_id,
+                "anchor_phrases": extract_quoted_phrases(query),
+            },
+        )
+    )
+
+
+def _pick_positive_control(anchors: list[Anchor]) -> str | None:
+    """Choose a control string that MUST collide if the harvest is real.
+
+    The longest harvested phrase, ties broken lexicographically for
+    determinism. It is a self-test of the harvest and the matcher, not of
+    completeness: it proves the machinery is looking at real anchors, which is
+    the difference between "no collisions" and "no data".
+
+    Only phrases that collide with *themselves* are eligible. A phrase of pure
+    wildcards ("*") has no literal segment to match on, so choosing it would
+    fail the control and void a perfectly good audit -- a false alarm in the
+    one mechanism whose job is to be trusted.
+    """
+    self_matching = [
+        a.phrase for a in anchors if collision_direction(a.phrase, a.phrase) is not None
+    ]
+    if not self_matching:
+        return None
+    return max(self_matching, key=lambda p: (len(p), p))
+
+
+@cli.command("audit-log-metric-anchors")
+@click.argument("candidate", metavar="CANDIDATE_STRING")
+@click.option(
+    "--positive-control",
+    default=None,
+    help=(
+        "A string that MUST collide. If it does not, the whole run is reported "
+        "ok:false, because a silently-empty harvest is indistinguishable from a "
+        "clean audit. Defaults to the longest phrase found in the harvest."
+    ),
+)
+@click.option(
+    "--detail",
+    is_flag=True,
+    default=False,
+    help=(
+        "Also GET each metric individually and assert the per-metric fetch "
+        "returns exactly the enumerated set."
+    ),
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json"]),
+    default="summary",
+    show_default=True,
+    help="summary and json carry the same envelope; json adds every anchor.",
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def audit_log_metric_anchors_cmd(
+    candidate: str,
+    positive_control: str | None,
+    detail: bool,
+    output_format: str,
+    site: str,
+    timeout: float,
+) -> None:
+    """Check a proposed log string against every live log-metric anchor.
+
+    Datadog matches a quoted phrase in a log-metric filter as a
+    CASE-INSENSITIVE SUBSTRING, at INTAKE. So a new log line that merely
+    contains someone else's anchor starts feeding their counter, silently and
+    permanently -- log metrics do not backfill, so the contamination cannot be
+    undone by fixing the string later.
+
+    That is a measured failure, not a hypothetical: a new log line for a
+    retirement code path was worded so that it contained the quoted anchor of
+    an unrelated metric counting a no-op code path. Tens of thousands of
+    retirement events were counted as no-ops, in a metric a monitor alerted on.
+
+    \b
+    Collisions are reported in BOTH directions:
+      anchor_in_candidate  an existing anchor occurs inside your string --
+                           shipping it feeds that metric.
+      candidate_in_anchor  your string occurs inside an existing anchor --
+                           a metric you build on it would eat their events.
+
+    The run carries a POSITIVE CONTROL: a string that must produce a hit. If
+    the control misses, the audit reports ok:false and exits non-zero, because
+    an empty harvest and a clean org look identical in the output.
+
+    \b
+    Examples:
+      dd-cli audit-log-metric-anchors 'Order retired: declining to reserve inventory'
+      dd-cli audit-log-metric-anchors 'Order retired: refusing to reserve inventory' \\
+        --positive-control 'Refusing to reserve inventory'
+    """
+    if not candidate.strip():
+        raise click.UsageError(
+            "CANDIDATE_STRING is empty. An empty string is a substring of "
+            "every anchor, so the audit would report every metric as a "
+            "collision and mean nothing."
+        )
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            harvest = _harvest_log_metrics(dd, detail=detail)
+    except DatadogAPIError as e:
+        _handle_api_error(e, extra={"candidate": candidate})
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra={"candidate": candidate})
+
+    anchors = harvest_anchors(harvest.metrics)
+    distinct_phrases = sorted({a.phrase for a in anchors})
+    with_phrases = len({a.metric_id for a in anchors})
+
+    hits = find_collisions(candidate, anchors)
+
+    control = positive_control or _pick_positive_control(anchors)
+    control_hits = find_collisions(control, anchors) if control else []
+    control_ok = bool(control_hits)
+
+    checked = {
+        "metrics": len(harvest.metrics),
+        "metrics_with_quoted_phrase": with_phrases,
+        "phrases": len(anchors),
+        "distinct_phrases": len(distinct_phrases),
+    }
+    extra: dict[str, Any] = {
+        "candidate": candidate,
+        "checked": checked,
+        "completeness": _completeness(harvest),
+        "positive_control": {
+            "value": control,
+            "source": "explicit" if positive_control else "derived_longest_phrase",
+            "ok": control_ok,
+            "hit_count": len(control_hits),
+            "hit_metric_ids": sorted({h["metric_id"] for h in control_hits}),
+        },
+    }
+    if output_format == "json":
+        extra["anchors"] = [
+            {"metric_id": a.metric_id, "phrase": a.phrase, "wildcard": a.wildcard}
+            for a in anchors
+        ]
+
+    payload = success_envelope(hits, extra=extra)
+
+    # Report the denominator on stderr too: 1 hit in 62 filters is a density
+    # that survives eyeballing, and "0 hits" is only meaningful next to the
+    # number of things actually checked.
+    warn(
+        f"audit checked {checked['metrics']} metrics / "
+        f"{checked['distinct_phrases']} distinct quoted phrases "
+        f"({checked['phrases']} total, {checked['metrics_with_quoted_phrase']} "
+        f"metrics carry one); {len(hits)} collision(s)."
+    )
+
+    if not control_ok:
+        reason = (
+            "no log-metric filter carries a quoted phrase, so there was "
+            "nothing to audit against"
+            if control is None
+            else f"positive control {control!r} produced no hit"
+        )
+        payload = {
+            **payload,
+            "ok": False,
+            "data": None,
+            "count": None,
+            "error": {
+                "message": (
+                    f"positive control FAILED: {reason}. The collision result "
+                    "above is not trustworthy -- an empty harvest and a clean "
+                    "org produce the same empty answer, so this run refuses to "
+                    "claim the candidate is safe."
+                ),
+            },
+        }
+        raise _ApiFailure(payload, "positive control failed; audit result void")
+
+    emit(payload)
+
+
+# ── Writing log metrics (update / delete) ───────────────────────────────
+#
+# Both commands carry the same warning, for the same reason: a log metric is
+# computed at INTAKE and never backfills. Nothing you do here can be validated
+# against history, and a mistyped filter produces a permanently empty series
+# that is indistinguishable from a healthy quiet one.
+
+_NO_BACKFILL_WARNING = (
+    "log metrics are computed at INTAKE and do NOT backfill: this change "
+    "cannot be validated against historical data, and a mistyped filter "
+    "yields a permanently empty series that reads exactly like 'healthy'. "
+    "Verify with `dd-cli query-metrics` within the hour, before you trust it."
+)
+
+
+@cli.command("update-log-metric")
+@click.argument("metric_id", metavar="METRIC_ID")
+@click.option(
+    "--query",
+    default=None,
+    help="New filter query (replaces the existing filter.query entirely).",
+)
+@click.option(
+    "--group-by",
+    multiple=True,
+    help=(
+        "Group-by attribute path (repeatable). REPLACES the existing group_by "
+        "list wholesale -- Datadog's PATCH has no per-entry merge. Custom "
+        "attributes need a leading '@'."
+    ),
+)
+@click.option(
+    "--clear-group-by",
+    is_flag=True,
+    default=False,
+    help="Remove every group_by entry (sends an empty list).",
+)
+@click.option(
+    "--include-percentiles/--no-include-percentiles",
+    "include_percentiles",
+    default=None,
+    help="Toggle p50-p99 aggregations. Distribution metrics only.",
+)
+@click.option(
+    "--allow-bare-path",
+    "allow_bare_paths",
+    is_flag=True,
+    default=False,
+    help="Permit a group-by path with no leading '@' (tag keys only).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print the before/after and send nothing.",
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def update_log_metric_cmd(
+    metric_id: str,
+    query: str | None,
+    group_by: tuple[str, ...],
+    clear_group_by: bool,
+    include_percentiles: bool | None,
+    allow_bare_paths: bool,
+    dry_run: bool,
+    site: str,
+    timeout: float,
+) -> None:
+    """Update a log-based metric's filter, group_by, or percentiles.
+
+    \b
+    SAFETY -- read before mutating a metric a monitor depends on:
+      A log metric is computed at INTAKE and does NOT backfill. Editing the
+      filter can therefore never be validated against historical data, and a
+      mistyped filter yields a permanently empty series that looks exactly like
+      a healthy quiet one. A monitor watching it will not alert; it will simply
+      stop having anything to say.
+      Prefer creating a NARROWED metric alongside the existing one and
+      repointing the monitor only after the new metric has produced a real
+      emission. That path is reversible; this one is not.
+
+    \b
+    Datadog's PATCH accepts three fields and no others:
+      filter.query, group_by, compute.include_percentiles
+    compute.aggregation_type and compute.path are fixed at creation. A metric
+    that needs a different one must be recreated under a new name.
+
+    \b
+    Examples:
+      dd-cli update-log-metric my.metric --query 'service:x "new phrase"' --dry-run
+      dd-cli update-log-metric my.metric --group-by service --group-by env
+    """
+    if group_by and clear_group_by:
+        raise click.UsageError(
+            "--group-by and --clear-group-by contradict each other; pass one."
+        )
+    if query is not None and not query.strip():
+        raise click.UsageError(
+            "--query is empty. Datadog treats a missing filter as '*', so an "
+            "empty query would silently widen the metric to every log in the "
+            "org rather than narrow it."
+        )
+
+    group_by_list: list[dict[str, str]] | None = None
+    if clear_group_by:
+        group_by_list = []
+    elif group_by:
+        group_by_list = [{"path": g, "tag_name": g.lstrip("@")} for g in group_by]
+
+    if query is None and group_by_list is None and include_percentiles is None:
+        raise click.UsageError(
+            "Nothing to update. Pass --query, --group-by/--clear-group-by, or "
+            "--include-percentiles/--no-include-percentiles. (Datadog's PATCH "
+            "accepts only those; aggregation type and compute path are fixed "
+            "at creation.)"
+        )
+
+    for entry in group_by_list or []:
+        try:
+            validate_log_metric_path(
+                entry["path"], kind="group_by path", allow_bare=allow_bare_paths
+            )
+        except LogMetricPathError as e:
+            raise click.UsageError(str(e)) from None
+
+    extra_ctx = {"metric_id": metric_id, "dry_run": dry_run}
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            before_payload = dd.get_log_metric(metric_id)
+            before = (before_payload or {}).get("data")
+            if not isinstance(before, dict):
+                _handle_runtime_error(
+                    RuntimeError(
+                        f"GET of log metric {metric_id!r} returned no 'data'; "
+                        "refusing to PATCH a metric whose current state is "
+                        f"unknown. Response: {str(before_payload)[:200]}"
+                    ),
+                    extra=extra_ctx,
+                )
+
+            aggregation = ((before.get("attributes") or {}).get("compute") or {}).get(
+                "aggregation_type"
+            )
+            if include_percentiles is not None and aggregation != "distribution":
+                raise click.UsageError(
+                    f"--include-percentiles applies to distribution metrics; "
+                    f"{metric_id!r} is a {aggregation!r} metric. Datadog would "
+                    "either reject this or accept it and change nothing."
+                )
+
+            after_preview = _preview_log_metric_update(
+                before,
+                query=query,
+                group_by=group_by_list,
+                include_percentiles=include_percentiles,
+            )
+            changes = _log_metric_changes(before, after_preview)
+
+            if dry_run:
+                emit(
+                    success_envelope(
+                        {
+                            "dry_run": True,
+                            "before": before,
+                            "after": after_preview,
+                            "changes": changes,
+                            "sent_nothing": True,
+                        },
+                        extra={**extra_ctx, "warning": _NO_BACKFILL_WARNING},
+                    )
+                )
+                warn(_NO_BACKFILL_WARNING)
+                return
+
+            dd.update_log_metric(
+                metric_id,
+                query=query,
+                group_by=group_by_list,
+                include_percentiles=include_percentiles,
+                allow_bare_paths=allow_bare_paths,
+            )
+            # Re-read rather than trusting the PATCH response: what the server
+            # now holds is the only after-state worth printing.
+            after_payload = dd.get_log_metric(metric_id)
+            after = (after_payload or {}).get("data")
+            if not isinstance(after, dict):
+                _handle_runtime_error(
+                    RuntimeError(
+                        f"the PATCH of {metric_id!r} was sent, but re-reading "
+                        "the metric returned no 'data'. The change may have "
+                        f"landed. Response: {str(after_payload)[:200]}"
+                    ),
+                    extra=extra_ctx,
+                )
+    except LogMetricPathError as e:
+        raise click.UsageError(str(e)) from None
+    except ValueError as e:
+        raise click.UsageError(_log_metric_flag_advice(str(e))) from None
+    except DatadogAPIError as e:
+        _handle_api_error(e, extra=extra_ctx)
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra=extra_ctx)
+
+    emit(
+        success_envelope(
+            {
+                "dry_run": False,
+                "before": before,
+                "after": after,
+                "changes": _log_metric_changes(before, after),
+            },
+            extra={**extra_ctx, "warning": _NO_BACKFILL_WARNING},
+        )
+    )
+    warn(_NO_BACKFILL_WARNING)
+
+
+def _preview_log_metric_update(
+    before: dict[str, Any],
+    *,
+    query: str | None,
+    group_by: list[dict[str, str]] | None,
+    include_percentiles: bool | None,
+) -> dict[str, Any]:
+    """The state a successful PATCH would produce, computed locally.
+
+    Only used for --dry-run. A real run re-reads the metric instead of trusting
+    this, because a prediction that is printed as an observation is its own
+    small lie.
+    """
+    after = json.loads(json.dumps(before))
+    attrs = after.setdefault("attributes", {})
+    if query is not None:
+        attrs["filter"] = {"query": query}
+    if group_by is not None:
+        attrs["group_by"] = group_by
+    if include_percentiles is not None:
+        attrs.setdefault("compute", {})["include_percentiles"] = include_percentiles
+    return after
+
+
+def _log_metric_changes(
+    before: dict[str, Any], after: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Field-level before/after for the three patchable fields."""
+    b_attrs = before.get("attributes") or {}
+    a_attrs = after.get("attributes") or {}
+    fields = {
+        "filter.query": (
+            (b_attrs.get("filter") or {}).get("query"),
+            (a_attrs.get("filter") or {}).get("query"),
+        ),
+        "group_by": (b_attrs.get("group_by"), a_attrs.get("group_by")),
+        "compute.include_percentiles": (
+            (b_attrs.get("compute") or {}).get("include_percentiles"),
+            (a_attrs.get("compute") or {}).get("include_percentiles"),
+        ),
+    }
+    return [
+        {"field": name, "before": old, "after": new}
+        for name, (old, new) in fields.items()
+        if old != new
+    ]
+
+
+@cli.command("delete-log-metric")
+@click.argument("metric_id", metavar="METRIC_ID")
+@click.option(
+    "--yes",
+    "confirmed",
+    is_flag=True,
+    default=False,
+    help="Confirm the deletion. Required; there is no interactive prompt.",
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def delete_log_metric_cmd(
+    metric_id: str, confirmed: bool, site: str, timeout: float
+) -> None:
+    """Delete a log-based metric. Requires --yes.
+
+    Deletion stops future points; it does not remove the points already
+    emitted, and it does not warn you that a monitor is watching. Any monitor
+    querying this metric simply goes quiet -- which, for a monitor, reads as
+    good news. Check first:
+
+        dd-cli list-monitors --name <metric name fragment>
+
+    The metric's definition is printed before deletion so the deleted state is
+    recoverable by hand from the output.
+    """
+    if not confirmed:
+        raise click.UsageError(
+            f"refusing to delete log metric {metric_id!r} without --yes. "
+            "Deletion cannot be undone, the emitted history stays, and any "
+            "monitor on this metric goes silently no-data."
+        )
+
+    extra_ctx = {"metric_id": metric_id}
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            before_payload = dd.get_log_metric(metric_id)
+            before = (before_payload or {}).get("data")
+            if not isinstance(before, dict):
+                _handle_runtime_error(
+                    RuntimeError(
+                        f"GET of log metric {metric_id!r} returned no 'data'; "
+                        "refusing to delete a metric whose definition could "
+                        f"not be captured first. Response: "
+                        f"{str(before_payload)[:200]}"
+                    ),
+                    extra=extra_ctx,
+                )
+            dd.delete_log_metric(metric_id)
+    except DatadogAPIError as e:
+        _handle_api_error(e, extra=extra_ctx)
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra=extra_ctx)
+
+    emit(
+        success_envelope({"deleted": metric_id, "definition": before}, extra=extra_ctx)
+    )
+    warn(
+        f"deleted log metric {metric_id!r}. Points already emitted remain in "
+        "the metric's history; only future points stop."
+    )
 
 
 # ── Monitor options (shared by create-monitor / update-monitor) ─────────

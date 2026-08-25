@@ -314,6 +314,9 @@ class TestCaptureBeforeDestroy:
         # A 200 means Datadog deleted it; the definition must survive either way.
         assert payload["data"]["definition"]["query"] == FIXTURE_MONITOR["query"]
         assert payload["data"]["deleted_monitor_id"] is None
+        # Say that the cross-check did not happen, rather than reporting a
+        # plain success that silently skipped it.
+        assert "cross-check" in result.stderr
 
 
 class TestNotFound:

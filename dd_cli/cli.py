@@ -3989,7 +3989,13 @@ def delete_monitor_cmd(
         )
     )
 
-    if deleted_id is not None and str(deleted_id) != monitor_id:
+    if deleted_id is None:
+        warn(
+            f"deleted monitor {monitor_id}, but Datadog's response carried no "
+            "deleted_monitor_id, so which monitor it deleted could not be "
+            "cross-checked. The definition above is the only copy."
+        )
+    elif str(deleted_id) != monitor_id:
         warn(
             f"asked Datadog to delete monitor {monitor_id} but it reported "
             f"deleting {deleted_id}. Check which monitor is actually gone "

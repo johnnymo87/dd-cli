@@ -3961,12 +3961,22 @@ def delete_monitor_cmd(
                 if hint:
                     extra["hint"] = hint
                 _handle_api_error(e, extra=extra)
+            except RuntimeError as e:
+                # A network error or an unparseable body. `_write` does not
+                # retry either, precisely because the write may have landed --
+                # so this run cannot say whether the monitor still exists, and
+                # the captured definition matters more here than anywhere.
+                _handle_runtime_error(e, extra=captured)
     except DatadogAPIError as e:
         _handle_api_error(e, extra=extra_ctx)
     except RuntimeError as e:
         _handle_runtime_error(e, extra=extra_ctx)
 
-    deleted_id = (result or {}).get("deleted_monitor_id")
+    # A 2xx means Datadog deleted it, whatever the body looked like. An
+    # unexpected shape must not become a traceback here: an unhandled exception
+    # prints nothing on stdout, and this is a run where the monitor is already
+    # gone and the definition below is the only record of it.
+    deleted_id = result.get("deleted_monitor_id") if isinstance(result, dict) else None
 
     emit(
         success_envelope(

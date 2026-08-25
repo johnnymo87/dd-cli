@@ -240,6 +240,81 @@ class TestCaptureBeforeDestroy:
         assert payload["ok"] is False
         assert payload["definition"]["query"] == FIXTURE_MONITOR["query"]
 
+    def test_a_network_error_on_delete_still_carries_the_definition(
+        self, runner, mock_env
+    ):
+        """The DELETE may have landed; the response just never came back.
+
+        `_write` does not retry a transport error precisely because the write
+        may have happened, so this run ends not knowing whether the monitor
+        exists -- which makes the captured definition more valuable here, not
+        less.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "DELETE":
+                raise httpx.ConnectError("connection reset", request=request)
+            return httpx.Response(200, json=FIXTURE_MONITOR)
+
+        with patch(
+            "dd_cli.cli.DatadogClient",
+            partial(DatadogClient, transport=httpx.MockTransport(handler)),
+        ):
+            result = runner.invoke(cli, ["delete-monitor", "25391362", "--yes"])
+
+        assert result.exit_code != 0
+        payload = envelope(result)
+        assert payload["ok"] is False
+        assert payload["definition"]["query"] == FIXTURE_MONITOR["query"]
+
+    def test_an_unparseable_200_still_carries_the_definition(self, runner, mock_env):
+        """The worst run of all: the delete succeeded and the body is garbage.
+
+        A 200 means the monitor is gone, so dropping the definition here would
+        lose the only copy of a monitor that no longer exists.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "DELETE":
+                return httpx.Response(200, content=b"<html>gateway</html>")
+            return httpx.Response(200, json=FIXTURE_MONITOR)
+
+        with patch(
+            "dd_cli.cli.DatadogClient",
+            partial(DatadogClient, transport=httpx.MockTransport(handler)),
+        ):
+            result = runner.invoke(cli, ["delete-monitor", "25391362", "--yes"])
+
+        assert result.exit_code != 0
+        payload = envelope(result)
+        assert payload["ok"] is False
+        assert payload["definition"]["query"] == FIXTURE_MONITOR["query"]
+
+    def test_a_200_of_the_wrong_shape_does_not_crash_into_empty_stdout(
+        self, runner, mock_env
+    ):
+        """An unhandled traceback prints nothing on stdout.
+
+        That is the failure-as-empty-output shape the envelope contract exists
+        to ban, and it would land on a run where the monitor is already gone.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "DELETE":
+                return httpx.Response(200, json=[1, 2])
+            return httpx.Response(200, json=FIXTURE_MONITOR)
+
+        with patch(
+            "dd_cli.cli.DatadogClient",
+            partial(DatadogClient, transport=httpx.MockTransport(handler)),
+        ):
+            result = runner.invoke(cli, ["delete-monitor", "25391362", "--yes"])
+
+        payload = envelope(result)
+        # A 200 means Datadog deleted it; the definition must survive either way.
+        assert payload["data"]["definition"]["query"] == FIXTURE_MONITOR["query"]
+        assert payload["data"]["deleted_monitor_id"] is None
+
 
 class TestNotFound:
     def test_404_is_an_error_not_a_fake_success(self, runner, mock_env):

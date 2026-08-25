@@ -51,7 +51,8 @@ IDs, so a DELETE after a GET either hits the same object or 404s. It cannot
 delete a different monitor. The worst outcome is a marginally stale copy of the
 definition.
 
-**The ID is validated as an int64 before any request is sent.**
+**The ID is validated as digits-only before any request is sent** (not
+range-checked against int64 — an over-long number simply 404s on the read).
 `_parse_monitor_ref` returns non-URL input unchanged, and `get_monitor`
 interpolates the ID straight into the request path. For a read, junk input is a
 404 nuisance; for a DELETE it is request-forging surface — `delete-monitor

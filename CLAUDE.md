@@ -66,6 +66,7 @@ dd-cli get-incident 152 --enrich
 | `dd-cli get-monitor ID_OR_URL` | Get a monitor's details by ID or URL |
 | `dd-cli list-monitors` | List monitors by the monitor's own tag (`--tag`), the scope it watches (`--scope-tag`), and/or name (auto-paginates) |
 | `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, tags, thresholds and `options` (merge, not clobber) |
+| `dd-cli delete-monitor ID_OR_URL` | Delete a monitor by ID or URL (requires `--yes`; `--force` for SLO/composite refs) |
 | `dd-cli create-dashboard` | Create a dashboard from a `--spec` JSON body (+ title/tags flags) |
 | `dd-cli get-dashboard ID_OR_URL` | Get a dashboard's full definition by ID or URL |
 | `dd-cli update-dashboard ID_OR_URL` | Update (full replace) a dashboard from a `--spec` JSON body (+ title/tags flags) |
@@ -242,6 +243,15 @@ metric afterwards rather than printing its own prediction as an observation.
 `delete-log-metric` requires `--yes`, prints the definition it is about to
 delete, and warns that emitted history stays while any monitor on the metric
 goes silently no-data.
+
+`delete-monitor` is irreversible and Datadog will not hand the monitor back,
+so it requires `--yes`, reads the monitor first, and prints the full definition
+it destroyed (on the failure envelope too -- a DELETE that fails may still have
+landed). A 404 is reported as an error, never as an idempotent success: the
+same 404 covers "already deleted", "wrong ID" and "`DD_SITE` points at the
+wrong region", and only the first of those makes success a true statement.
+Datadog refuses (400) when an SLO or composite monitor references the monitor;
+`--force` deletes anyway and leaves that reference dangling.
 
 Run `dd-cli --help` or `dd-cli <command> --help` for details.
 

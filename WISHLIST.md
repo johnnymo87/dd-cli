@@ -29,6 +29,16 @@ counted under an unrelated metric before anyone noticed, and metrics do not
 backfill, so the history stays wrong. Doing that audit by hand was an
 instruction in a downstream repo's CLAUDE.md that dd-cli could not serve.
 
+### ~~8. Delete a monitor~~ ✅
+
+`create-monitor`, `get-monitor`, `list-monitors` and `update-monitor` existed
+with no way to remove one. A duplicate monitor created during triage therefore
+got renamed `[DEPRECATED - DELETE ME]`, had its notification handles stripped,
+and was handed to a human to finish in the UI -- a chore manufactured by an
+incomplete tool. Shipped as `delete-monitor`, which captures the definition
+before destroying it, refuses to call a 404 a success, and explains Datadog's
+SLO/composite refusal instead of forcing past it by default.
+
 ## Medium Priority
 
 ### 2. Progress indicator for slow queries -- partially addressed

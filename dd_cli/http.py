@@ -1091,6 +1091,39 @@ class DatadogClient:
             params["group_states"] = group_states
         return self._read("GET", f"/api/v1/monitor/{monitor_id}", params=params or None)
 
+    def delete_monitor(
+        self,
+        monitor_id: str,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Delete a monitor by ID (DELETE /api/v1/monitor/{id}).
+
+        Answers ``{"deleted_monitor_id": <id>}`` on success. There is no undo:
+        Datadog does not keep a deleted monitor around to be restored through
+        the API, so the caller is responsible for capturing the definition
+        first.
+
+        Datadog refuses (400) to delete a monitor that an SLO or a composite
+        monitor references, naming the referencing resource in the error.
+        ``force=True`` sends ``?force=true`` and deletes it anyway -- which
+        leaves the SLO or composite pointing at a monitor that no longer
+        exists; Datadog does not clean the reference up.
+
+        ``force`` is omitted entirely unless asked for. The parameter is a
+        *string* on the wire per Datadog's spec, not a bool.
+
+        Args:
+            monitor_id: The numeric monitor ID.
+            force: Delete even when another resource references the monitor.
+        """
+        params = {"force": "true"} if force else None
+        # Escaped even though the CLI validates the ID first: an unescaped '?'
+        # or '/' here would let a caller rewrite the request path or bolt on a
+        # query parameter (e.g. force) that nobody asked for.
+        escaped = urllib.parse.quote(monitor_id, safe="")
+        return self._write("DELETE", f"/api/v1/monitor/{escaped}", params=params)
+
     # ── Dashboards (v1) ─────────────────────────────────────────────
 
     def create_dashboard(self, *, body: dict[str, Any]) -> dict[str, Any]:

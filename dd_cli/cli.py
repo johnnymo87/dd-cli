@@ -2157,6 +2157,26 @@ def _parse_monitor_ref(ref: str) -> str:
     return ref
 
 
+def _parse_monitor_id(ref: str) -> str:
+    """Parse a monitor ref and hold it to being an actual monitor ID.
+
+    ``_parse_monitor_ref`` hands back non-URL input unchanged, and the client
+    interpolates the result into the request path. For a read that means a 404;
+    for a DELETE it means a ref carrying ``/`` or ``?`` can rewrite the request
+    -- ``delete-monitor '123?force=true'`` must not be expressible. A URL that
+    points at a page rather than a monitor (``/monitors/manage``) parses to
+    ``"manage"`` and is refused here for the same reason.
+    """
+    monitor_id = _parse_monitor_ref(ref)
+    if not re.fullmatch(r"[0-9]+", monitor_id):
+        raise click.UsageError(
+            f"{monitor_id!r} is not a monitor ID. Expected the numeric ID or a "
+            "Datadog monitor URL like "
+            "'https://us3.datadoghq.com/monitors/25391362'."
+        )
+    return monitor_id
+
+
 _MONITOR_SUMMARY_FIELDS = ("id", "name", "type", "overall_state", "tags")
 
 
@@ -3796,6 +3816,180 @@ def update_monitor_cmd(
         _handle_runtime_error(e)
 
     click.echo(json.dumps(data, indent=2))
+
+
+_MONITOR_NOT_FOUND_HINT = (
+    "Datadog has no monitor {monitor_id}. Three different situations produce "
+    "this same 404 and they are not interchangeable: the monitor was already "
+    "deleted, the ID is wrong, or DD_SITE points at the wrong Datadog region "
+    "and the monitor is alive in another one. Nothing was deleted."
+)
+
+# Datadog's two reference refusals, verified against its API:
+#   monitor [<id>,<name>] is referenced in slos: [<slo id>,<name>]
+#   monitor [<id>,<name>] is referenced in composite monitors: [<id>,<name>]
+_MONITOR_REFERENCE_REFUSAL = re.compile(
+    r"referenced in (slos|composite monitors)", re.IGNORECASE
+)
+
+_FORCE_HINT = (
+    "Datadog refuses to delete a monitor that something else points at. "
+    "--force deletes it anyway, and that is not a cleanup: the SLO or "
+    "composite monitor is left with a dangling reference to a monitor that no "
+    "longer exists. Fix the referencing resource first unless you know you "
+    "want the dangling reference."
+)
+
+
+def _reference_refusal_hint(e: DatadogAPIError) -> str | None:
+    """Explain a 400 that refuses the delete because something references it.
+
+    Decoration only. The failure is already a failure -- ``ok: false`` and the
+    non-zero exit do not depend on this match -- so if Datadog rewords its
+    refusal the cost is a missing hint, never a misclassified result.
+    """
+    if e.status_code != 400:
+        return None
+    haystack = f"{e} {e.response_body or ''}"
+    return _FORCE_HINT if _MONITOR_REFERENCE_REFUSAL.search(haystack) else None
+
+
+@cli.command("delete-monitor")
+@click.argument("monitor_id_or_url", metavar="MONITOR")
+@click.option(
+    "--yes",
+    "confirmed",
+    is_flag=True,
+    default=False,
+    help="Confirm the deletion. Required; there is no interactive prompt.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Delete even when an SLO or composite monitor references this monitor. "
+        "This does not clean the reference up -- it leaves it dangling. Still "
+        "requires --yes."
+    ),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def delete_monitor_cmd(
+    monitor_id_or_url: str,
+    confirmed: bool,
+    force: bool,
+    site: str,
+    timeout: float,
+) -> None:
+    """Delete a monitor by ID or URL. Requires --yes.
+
+    There is no undo. Datadog will not hand the monitor back through the API,
+    so the definition is read and printed before the delete: the envelope's
+    `data.definition` is the only copy of what you destroyed, and it is
+    attached to the failure envelope too, for the runs where the DELETE itself
+    goes wrong.
+
+    Deleting a monitor also silently removes things that were attached to it --
+    its downtimes stop mattering, and anything watching it simply goes quiet,
+    which for alerting reads as good news. Datadog does refuse (400) when an
+    SLO or a composite monitor references the monitor; --force overrides that
+    and leaves the reference dangling.
+
+    \b
+    Examples:
+        dd-cli delete-monitor 25391362 --yes
+    \b
+        dd-cli delete-monitor 'https://us3.datadoghq.com/monitors/25391362' --yes
+    """
+    if not confirmed:
+        raise click.UsageError(
+            f"refusing to delete monitor {monitor_id_or_url!r} without --yes. "
+            "Deletion cannot be undone, and anything that was alerting on this "
+            "monitor goes quiet rather than telling you it stopped."
+        )
+
+    monitor_id = _parse_monitor_id(monitor_id_or_url)
+    extra_ctx: dict[str, Any] = {"monitor_id": monitor_id}
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            try:
+                before = dd.get_monitor(monitor_id)
+            except DatadogAPIError as e:
+                extra = dict(extra_ctx)
+                if e.status_code == 404:
+                    extra["hint"] = _MONITOR_NOT_FOUND_HINT.format(
+                        monitor_id=monitor_id
+                    )
+                _handle_api_error(e, extra=extra)
+
+            if not isinstance(before, dict):
+                _handle_runtime_error(
+                    RuntimeError(
+                        f"GET of monitor {monitor_id} returned no monitor "
+                        "object; refusing to delete a monitor whose definition "
+                        f"could not be captured first. Response: "
+                        f"{str(before)[:200]}"
+                    ),
+                    extra=extra_ctx,
+                )
+
+            # Every path from here on carries the captured definition, failures
+            # included: a DELETE that landed can still be reported as a failure
+            # (a headered 429 is retried once, and the retry sees a monitor
+            # that is already gone), and that is precisely the run where the
+            # only surviving copy of the monitor is this one.
+            captured = {**extra_ctx, "definition": before}
+            try:
+                result = dd.delete_monitor(monitor_id, force=force)
+            except DatadogAPIError as e:
+                extra = dict(captured)
+                hint = _reference_refusal_hint(e)
+                if hint:
+                    extra["hint"] = hint
+                _handle_api_error(e, extra=extra)
+    except DatadogAPIError as e:
+        _handle_api_error(e, extra=extra_ctx)
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra=extra_ctx)
+
+    deleted_id = (result or {}).get("deleted_monitor_id")
+
+    emit(
+        success_envelope(
+            {
+                "deleted": monitor_id,
+                "deleted_monitor_id": deleted_id,
+                "definition": before,
+            },
+            extra=extra_ctx,
+        )
+    )
+
+    if deleted_id is not None and str(deleted_id) != monitor_id:
+        warn(
+            f"asked Datadog to delete monitor {monitor_id} but it reported "
+            f"deleting {deleted_id}. Check which monitor is actually gone "
+            "before trusting this run."
+        )
+    else:
+        warn(
+            f"deleted monitor {monitor_id}. This cannot be undone; the "
+            "definition above is the only copy."
+        )
 
 
 @cli.command("list-slos")

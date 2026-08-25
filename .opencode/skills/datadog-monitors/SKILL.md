@@ -1,6 +1,6 @@
 ---
 name: datadog-monitors
-description: Create, inspect, and update Datadog monitors via API - get monitor details by ID or URL, create or update metric/query alerts with thresholds and Slack notifications. Use when setting up alerting, tuning monitors, investigating monitor triggers, or checking monitor group states.
+description: Create, inspect, update and delete Datadog monitors via API - get monitor details by ID or URL, create or update metric/query alerts with thresholds and Slack notifications, delete a monitor safely. Use when setting up alerting, tuning monitors, investigating monitor triggers, checking monitor group states, or removing a monitor you created by mistake.
 ---
 
 # Datadog Monitors
@@ -301,6 +301,56 @@ dd-cli update-monitor 12345678 \
 | `max` | Fires on any spike in the window | High-sensitivity, never-miss alerts |
 | `avg` | Fires when average exceeds threshold | Sustained-load alerts |
 | `min` | Fires only if threshold exceeded for entire window | Filtering transient blips (deploys, restarts) |
+
+## Delete a Monitor
+
+```bash
+# By numeric ID or by URL. --yes is required; there is no interactive prompt.
+dd-cli delete-monitor 25391362 --yes
+dd-cli delete-monitor 'https://us3.datadoghq.com/monitors/25391362' --yes
+
+# Only after reading the refusal: delete despite an SLO/composite reference
+dd-cli delete-monitor 25391362 --yes --force
+```
+
+**There is no undo.** Datadog will not return a deleted monitor through the
+API, so dd-cli reads the monitor before deleting it and puts the whole
+definition in the envelope under `data.definition` -- and on the *failure*
+envelope too, because a DELETE that fails may still have landed. That output is
+your only backup; keep it before you close the terminal.
+
+**A 404 is an error, not a quiet success.** The same 404 means "already
+deleted", "wrong ID", *and* "`DD_SITE` points at the wrong region while the
+monitor is alive in another one". Only one of those makes "deleted" a true
+statement, so the command refuses to claim it.
+
+**Reference refusals.** Datadog answers 400 when an SLO or a composite monitor
+references the monitor:
+
+```
+monitor [25391362,name] is referenced in slos: [34dbd...,availability]
+monitor [25391362,name] is referenced in composite monitors: [37050226,rollup]
+```
+
+dd-cli attaches a `hint` naming `--force`. Prefer fixing the referencing SLO or
+composite first: `--force` does not clean the reference up, it leaves the SLO or
+composite pointing at a monitor that no longer exists.
+
+**No bulk form, deliberately.** One monitor per invocation, each with its own
+exit code. Loop in the shell if you must -- but a half-finished bulk delete has
+no honest way to report itself.
+
+### delete-monitor Options
+
+| Option | Required | Description |
+| --- | --- | --- |
+| `--yes` | yes | Confirm the deletion. No interactive prompt exists. |
+| `--force` | no | Delete despite an SLO/composite reference, leaving it dangling |
+| `--site` | no | Datadog site (defaults to `DD_SITE`) |
+| `--timeout` | no | Request timeout in seconds |
+
+- **Endpoint**: `DELETE /api/v1/monitor/{monitor_id}` (`?force=true` with `--force`)
+- **Response**: `{"deleted_monitor_id": <id>}`, cross-checked against the ID you asked for
 
 ## create-monitor Options
 

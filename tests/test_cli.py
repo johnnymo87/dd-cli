@@ -872,7 +872,7 @@ class TestListTeamNotificationRules:
                 keyword="supply-chain",
                 me=False,
                 include=None,
-                fields=["handle", "name"],
+                fields=["handle", "name", "user_count"],
                 page_number=0,
                 page_size=100,
                 sort=None,
@@ -916,6 +916,324 @@ class TestListTeamNotificationRules:
             assert result.exit_code == 0, result.output
             assert mock_client.list_teams.call_count == 2
             mock_client.list_team_notification_rules.assert_called_once_with("team-123")
+
+
+class TestListTeamMembers:
+    """Tests for list-team-members command.
+
+    The whole point of this command is the *join*: Datadog returns membership
+    records that carry only a user UUID, and the human-meaningful identity
+    (email) arrives separately in ``included``. A membership whose user is
+    absent from ``included`` must therefore never be dropped and never be
+    reported as a member with a null email and nothing else said about it --
+    that is an error represented as data.
+    """
+
+    def _team(self, team_id: str = "team-123", handle: str = "supplychain") -> dict:
+        return {
+            "id": team_id,
+            "type": "team",
+            "attributes": {"name": "Supply Chain", "handle": handle, "user_count": 2},
+        }
+
+    def _membership(self, user_id: str, *, role: str | None = None) -> dict:
+        return {
+            "id": f"TeamMembership-team-123-{user_id}",
+            "type": "team_memberships",
+            "attributes": {"provisioned_by": "saml_mapping", "role": role},
+            "relationships": {"user": {"data": {"id": user_id, "type": "users"}}},
+        }
+
+    def _user(self, user_id: str, email: str) -> dict:
+        return {
+            "id": user_id,
+            "type": "users",
+            "attributes": {
+                "email": email,
+                "handle": email,
+                "name": email.split("@")[0],
+                "status": "Active",
+                "disabled": False,
+                "service_account": False,
+            },
+        }
+
+    def test_resolves_handle_and_joins_users(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.return_value = {
+                "data": [
+                    self._membership("u1", role="admin"),
+                    self._membership("u2"),
+                ],
+                "included": [
+                    self._user("u2", "bob@example.com"),
+                    self._user("u1", "ana@example.com"),
+                ],
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-team-members", "supplychain"])
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_teams.assert_called_once_with(
+                keyword="supplychain",
+                me=False,
+                include=None,
+                fields=["handle", "name", "user_count"],
+                page_number=0,
+                page_size=100,
+                sort=None,
+            )
+            mock_client.list_team_memberships.assert_called_once_with(
+                "team-123",
+                keyword=None,
+                page_number=0,
+                page_size=100,
+                sort=None,
+            )
+            output = json.loads(result.stdout)
+            assert output["ok"] is True
+            assert output["truncated"] is False
+            assert output["count"] == 2
+            assert output["team"] == {
+                "id": "team-123",
+                "handle": "supplychain",
+                "name": "Supply Chain",
+                "user_count": 2,
+            }
+            assert [m["email"] for m in output["data"]] == [
+                "ana@example.com",
+                "bob@example.com",
+            ]
+            assert output["data"][0]["role"] == "admin"
+
+    def test_unresolved_user_is_reported_not_silently_nulled(self, runner, mock_env):
+        """A membership with no matching user in `included` is a partial answer.
+
+        Emitting it with ``email: null`` and ``ok: true`` would let a caller
+        derive a reviewer list that is quietly one person short.
+        """
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.return_value = {
+                "data": [self._membership("u1"), self._membership("ghost")],
+                "included": [self._user("u1", "ana@example.com")],
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-team-members", "supplychain"])
+
+            assert result.exit_code == 0, result.output
+            output = json.loads(result.stdout)
+            assert output["count"] == 2
+            ghost = next(m for m in output["data"] if m["user_id"] == "ghost")
+            assert ghost["email"] is None
+            assert ghost["user_resolved"] is False
+            assert output["warnings"], "unresolved user must be surfaced"
+            assert "ghost" in json.dumps(output["warnings"])
+
+    def test_count_mismatch_against_team_user_count_is_warned(self, runner, mock_env):
+        """Datadog's own user_count disagreeing with the rows we got is a
+        signal the list is not the whole team. Silence there would make a
+        short reviewer list look authoritative.
+        """
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.return_value = {
+                "data": [self._membership("u1")],
+                "included": [self._user("u1", "ana@example.com")],
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-team-members", "supplychain"])
+
+            assert result.exit_code == 0, result.output
+            # team fixture declares user_count=2, one membership returned.
+            assert "user_count" in result.stderr
+            output = json.loads(result.stdout)
+            assert output["count"] == 1
+            assert output["team"]["user_count"] == 2
+
+    def test_no_mismatch_warning_when_counts_agree(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.return_value = {
+                "data": [self._membership("u1"), self._membership("u2")],
+                "included": [
+                    self._user("u1", "ana@example.com"),
+                    self._user("u2", "bob@example.com"),
+                ],
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-team-members", "supplychain"])
+
+            assert result.exit_code == 0, result.output
+            assert "user_count" not in result.stderr
+
+    def test_query_and_sort_passed_through(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.return_value = {"data": []}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli,
+                [
+                    "list-team-members",
+                    "supplychain",
+                    "--query",
+                    "ana@example.com",
+                    "--sort",
+                    "-name",
+                    "--max-results",
+                    "25",
+                ],
+            )
+
+            assert result.exit_code == 0, result.output
+            mock_client.list_team_memberships.assert_called_once_with(
+                "team-123",
+                keyword="ana@example.com",
+                page_number=0,
+                page_size=25,
+                sort="-name",
+            )
+            output = json.loads(result.stdout)
+            # An empty answer must be able to say which question it asked.
+            assert output["filters"] == {
+                "handle": "supplychain",
+                "query": ("ana@example.com"),
+            }
+
+    def test_auto_paginates_until_short_page(self, runner, mock_env):
+        first = {
+            "data": [self._membership(f"u{i}") for i in range(100)],
+            "included": [self._user(f"u{i}", f"u{i}@example.com") for i in range(100)],
+        }
+        second = {
+            "data": [self._membership("last")],
+            "included": [self._user("last", "last@example.com")],
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.side_effect = [first, second]
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["list-team-members", "supplychain", "--max-results", "500"]
+            )
+
+            assert result.exit_code == 0, result.output
+            assert mock_client.list_team_memberships.call_count == 2
+            calls = mock_client.list_team_memberships.call_args_list
+            assert calls[0].kwargs["page_number"] == 0
+            assert calls[1].kwargs["page_number"] == 1
+            # Page size held constant across pages, or page 1 re-reads page 0.
+            assert calls[0].kwargs["page_size"] == calls[1].kwargs["page_size"] == 100
+            output = json.loads(result.stdout)
+            assert output["count"] == 101
+            assert output["truncated"] is False
+
+    def test_truncation_is_marked_and_exits_3(self, runner, mock_env):
+        page = {
+            "data": [self._membership(f"u{i}") for i in range(2)],
+            "included": [self._user(f"u{i}", f"u{i}@example.com") for i in range(2)],
+        }
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.return_value = page
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["list-team-members", "supplychain", "--max-results", "2"]
+            )
+
+            assert result.exit_code == 3, result.output
+            output = json.loads(result.stdout)
+            assert output["truncated"] is True
+            assert output["truncation_reason"] == "max_results_boundary_unknown"
+
+    def test_unknown_handle_fails_loudly(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": []}
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-team-members", "nope"])
+
+            assert result.exit_code != 0
+            mock_client.list_team_memberships.assert_not_called()
+
+    def test_api_error_emits_failure_envelope_with_null_count(self, runner, mock_env):
+        from dd_cli.http import DatadogAPIError
+
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.side_effect = DatadogAPIError(
+                status_code=403, message="Forbidden", response_body="{}"
+            )
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(cli, ["list-team-members", "supplychain"])
+
+            assert result.exit_code != 0
+            output = json.loads(result.stdout)
+            assert output["ok"] is False
+            # A failed request observed nothing; it must not claim zero members.
+            assert output["count"] is None
+            assert output["data"] is None
+
+    def test_format_jsonl_streams_records(self, runner, mock_env):
+        with patch("dd_cli.cli.DatadogClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.list_teams.return_value = {"data": [self._team()]}
+            mock_client.list_team_memberships.return_value = {
+                "data": [self._membership("u1"), self._membership("u2")],
+                "included": [
+                    self._user("u1", "ana@example.com"),
+                    self._user("u2", "bob@example.com"),
+                ],
+            }
+            mock_client_class.return_value = mock_client
+
+            result = runner.invoke(
+                cli, ["list-team-members", "supplychain", "--format", "jsonl"]
+            )
+
+            assert result.exit_code == 0, result.output
+            lines = result.stdout.strip().split("\n")
+            assert len(lines) == 2
+            assert json.loads(lines[0])["email"] == "ana@example.com"
 
 
 class TestGetEtIssue:

@@ -3581,7 +3581,7 @@ def _resolve_team_by_handle(dd: DatadogClient, handle: str) -> dict[str, Any]:
         keyword=handle,
         me=False,
         include=None,
-        fields=["handle", "name"],
+        fields=["handle", "name", "user_count"],
         sort=None,
         max_results=1000,
     )
@@ -3690,6 +3690,251 @@ def _output_teams(result: PagedResult, output_format: str) -> dict[str, Any] | N
         return success_envelope(teams, result=result)
 
     return success_envelope([_team_summary(team) for team in teams], result=result)
+
+
+@cli.command("list-team-members")
+@click.argument("handle", metavar="HANDLE")
+@click.option(
+    "--query",
+    default=None,
+    help="Filter members by name or email keyword.",
+)
+@click.option(
+    "--sort",
+    type=click.Choice(["name", "-name", "email", "-email", "role", "-role"]),
+    default=None,
+    help="Sort returned members.",
+)
+@click.option("--max-results", type=int, default=1000, show_default=True)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["summary", "json", "jsonl"]),
+    default="summary",
+    show_default=True,
+)
+@click.option("--site", envvar="DD_SITE", default=_default_site, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True)
+@truncation_option
+def list_team_members_cmd(
+    handle: str,
+    query: str | None,
+    sort: str | None,
+    max_results: int,
+    output_format: str,
+    site: str,
+    timeout: float,
+    on_truncation: str,
+) -> None:
+    """List the members of a Datadog Team, by team HANDLE.
+
+    Takes a handle (as written in *.datadog.yaml), not a UUID, and resolves
+    the team id internally.
+
+    \b
+    Datadog returns membership records carrying only a user UUID; the email
+    arrives separately under 'included'. This command performs that join, so a
+    member whose user record is missing is reported with user_resolved=false
+    and a warning rather than a bare null. Without a --query, a row count that
+    disagrees with the team's own user_count is warned about on stderr.
+
+    \b
+    Examples:
+      dd-cli list-team-members supplychain
+      dd-cli list-team-members supplychain --format json
+      dd-cli list-team-members supplychain --query ana@example.com
+    """
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            team = _resolve_team_by_handle(dd, handle)
+            members = _fetch_team_members(
+                dd,
+                team["id"],
+                keyword=query,
+                sort=sort,
+                max_results=max_results,
+            )
+    except DatadogAPIError as e:
+        _handle_api_error(e)
+    except RuntimeError as e:
+        _handle_runtime_error(e)
+
+    team_attrs = team.get("attributes") or {}
+    extra = {
+        "team": {
+            "id": team.get("id"),
+            "handle": team_attrs.get("handle"),
+            "name": team_attrs.get("name"),
+            "user_count": team_attrs.get("user_count"),
+        },
+        "filters": {"handle": handle, "query": query},
+    }
+    if not members.items:
+        # An empty set that cannot say what it searched for is
+        # indistinguishable from a clean result.
+        warn(
+            f"no members matched team handle={handle!r} query={query!r}; "
+            "this is an answer about that question only."
+        )
+
+    declared = team_attrs.get("user_count")
+    # Only meaningful for an unfiltered, complete listing: a --query is
+    # *supposed* to return fewer rows than the team has members.
+    if (
+        query is None
+        and not members.truncated
+        and isinstance(declared, int)
+        and declared != len(members.items)
+    ):
+        warn(
+            f"team {handle!r} declares user_count={declared} but "
+            f"{len(members.items)} membership row(s) were returned. Do not "
+            "treat this list as the complete team until the difference is "
+            "explained."
+        )
+
+    payload = _output_team_members(members, output_format, extra=extra)
+    finish(members, payload, on_truncation=on_truncation, describe="team members")
+
+
+def _fetch_team_members(
+    dd: DatadogClient,
+    team_id: str,
+    *,
+    keyword: str | None,
+    sort: str | None,
+    max_results: int,
+) -> PagedResult:
+    """Page through a team's memberships, joining each to its user record.
+
+    The page size is chosen once and held constant: page-number pagination with
+    a shrinking page size re-reads rows already seen and skips the rest (see
+    the same note on :func:`_fetch_teams`).
+    """
+    page_size = min(100, max_results)
+    members: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    page_number = 0
+    truncated = False
+    pages = 0
+
+    while len(members) < max_results:
+        page = dd.list_team_memberships(
+            team_id,
+            keyword=keyword,
+            page_number=page_number,
+            page_size=page_size,
+            sort=sort,
+        )
+        pages += 1
+        batch = page.get("data", [])
+        if not isinstance(batch, list):
+            raise RuntimeError(
+                "team memberships expected 'data' to be a JSON array, got "
+                f"{type(batch).__name__}"
+            )
+
+        users = {
+            user.get("id"): (user.get("attributes") or {})
+            for user in (page.get("included") or [])
+            if isinstance(user, dict) and user.get("type") == "users"
+        }
+        for membership in batch:
+            member, missing = _team_member_record(membership, users)
+            members.append(member)
+            if missing is not None:
+                warnings.append(missing)
+
+        if len(batch) < page_size:
+            break
+        page_number += 1
+    else:
+        truncated = True
+
+    if len(members) > max_results:
+        truncated = True
+        members = members[:max_results]
+
+    return PagedResult(
+        items=members,
+        truncated=truncated,
+        truncation_reason=REASON_MAX_RESULTS_UNKNOWN if truncated else None,
+        pages_fetched=pages,
+        warnings=warnings or None,
+    )
+
+
+def _team_member_record(
+    membership: dict[str, Any],
+    users: dict[str | None, dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Join one membership to its user, reporting an unjoinable one."""
+    attrs = membership.get("attributes") or {}
+    rel = ((membership.get("relationships") or {}).get("user") or {}).get("data") or {}
+    user_id = rel.get("id")
+    user = users.get(user_id)
+    resolved = user is not None
+    user = user or {}
+
+    record = {
+        "membership_id": membership.get("id"),
+        "user_id": user_id,
+        "user_resolved": resolved,
+        "email": user.get("email"),
+        "name": user.get("name"),
+        "handle": user.get("handle"),
+        "status": user.get("status"),
+        "disabled": user.get("disabled"),
+        "service_account": user.get("service_account"),
+        "role": attrs.get("role"),
+        "provisioned_by": attrs.get("provisioned_by"),
+    }
+    if resolved:
+        return record, None
+    return record, {
+        "kind": "unresolved_user",
+        "user_id": user_id,
+        "membership_id": membership.get("id"),
+        "message": (
+            f"membership {membership.get('id')!r} references user {user_id!r}, "
+            "which Datadog did not return in 'included'; this member has no "
+            "email and must not be treated as absent."
+        ),
+    }
+
+
+def _output_team_members(
+    result: PagedResult,
+    output_format: str,
+    *,
+    extra: dict[str, Any],
+) -> dict[str, Any] | None:
+    members = result.items
+    if output_format == "jsonl":
+        for member in members:
+            click.echo(json.dumps(member))
+        warn(f"count={len(members)} truncated={str(result.truncated).lower()}")
+        return None
+
+    if output_format == "json":
+        return success_envelope(members, result=result, extra=extra)
+
+    return success_envelope(
+        [_team_member_summary(member) for member in members],
+        result=result,
+        extra=extra,
+    )
+
+
+def _team_member_summary(member: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "email": member["email"],
+        "name": member["name"],
+        "user_id": member["user_id"],
+        "user_resolved": member["user_resolved"],
+        "role": member["role"],
+        "disabled": member["disabled"],
+    }
 
 
 def _team_summary(team: dict[str, Any]) -> dict[str, Any]:

@@ -73,6 +73,7 @@ dd-cli get-incident 152 --enrich
 | `dd-cli list-dashboards` | List dashboards, optionally filtered by title |
 | `dd-cli list-teams` | List/search Datadog Teams by name, handle, or member email |
 | `dd-cli find-user-teams MEMBER` | Find Datadog Teams matching a user/member email or name |
+| `dd-cli list-team-members HANDLE` | List a team's members (email, name, role) by team handle |
 | `dd-cli list-team-notification-rules HANDLE` | List team notification routing rules, including PagerDuty handles |
 | `dd-cli list-slos` | List SLOs, optionally filtered by the SLOs' own tags |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
@@ -96,7 +97,16 @@ Teams commands are read-only. Examples:
 ```bash
 dd-cli list-teams --query platform
 dd-cli find-user-teams user@example.com
+dd-cli list-team-members supplychain --format json
 ```
+
+`list-team-members` exists so that hand-maintained team->reviewer maps can be
+re-derived instead of trusted. Datadog returns membership rows carrying only a
+user UUID and the identities separately under `included`; the command performs
+that join, marks any membership it could not join with `user_resolved: false`
+plus a `warnings[]` entry, and warns on stderr when the row count disagrees
+with the team's own `user_count` — a short list that looked authoritative is
+exactly the failure mode this command is meant to remove, not introduce.
 
 PagerDuty helpers are Datadog-only and read-only. `validate-catalog` expects
 Software Catalog v3 PagerDuty links to use `integrations.pagerduty.serviceURL`.

@@ -51,6 +51,7 @@ dd-cli validate
 | `dd-cli get-dashboard ID_OR_URL` | Get a dashboard's full definition by ID or URL |
 | `dd-cli update-dashboard ID_OR_URL` | Update (full replace) a dashboard from a `--spec` JSON body (+ title/tags flags) |
 | `dd-cli list-dashboards` | List dashboards, optionally filtered by title |
+| `dd-cli list-team-members HANDLE` | List a Datadog team's members (email, name, role) by team handle |
 | `dd-cli list-slos` | List SLOs, optionally filtered by the SLOs' own tags |
 | `dd-cli get-slo ID` | Get SLO details and history (SLI value, error budget) |
 | `dd-cli query-metrics QUERY` | Query a metric timeseries; per-series scope with first/last/min/max/avg |

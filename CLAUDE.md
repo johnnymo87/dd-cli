@@ -67,6 +67,8 @@ dd-cli get-incident 152 --enrich
 | `dd-cli list-monitors` | List monitors by the monitor's own tag (`--tag`), the scope it watches (`--scope-tag`), and/or name (auto-paginates) |
 | `dd-cli update-monitor ID_OR_URL` | Update a monitor's query, name, tags, thresholds and `options` (merge, not clobber) |
 | `dd-cli delete-monitor ID_OR_URL` | Delete a monitor by ID or URL (requires `--yes`; `--force` for SLO/composite refs) |
+| `dd-cli mute-monitor ID_OR_URL` | Mute a monitor until an expiry you name (`--until 4h`, `--until '2026-09-08T00:00:00Z'`, `--scope`); refuses an indefinite mute without `--forever` |
+| `dd-cli unmute-monitor ID_OR_URL` | Unmute a monitor (the ONLY way to clear `silenced`), verified by re-reading the monitor |
 | `dd-cli create-dashboard` | Create a dashboard from a `--spec` JSON body (+ title/tags flags) |
 | `dd-cli get-dashboard ID_OR_URL` | Get a dashboard's full definition by ID or URL |
 | `dd-cli update-dashboard ID_OR_URL` | Update (full replace) a dashboard from a `--spec` JSON body (+ title/tags flags) |
@@ -262,6 +264,27 @@ same 404 covers "already deleted", "wrong ID" and "`DD_SITE` points at the
 wrong region", and only the first of those makes success a true statement.
 Datadog refuses (400) when an SLO or composite monitor references the monitor;
 `--force` deletes anyway and leaves that reference dangling.
+
+Muting is the one monitor state that cannot be round-tripped through
+`update-monitor`. A PUT carrying `options.silenced` mutes the monitor, but a
+PUT carrying `silenced: {}` or `silenced: null` answers 200 and leaves it
+muted -- a silent no-op that tells an operator a paging monitor is alerting
+again while it is still gagged (verified against the live API, 2026-08-31).
+`update-monitor` therefore refuses `--option silenced=...` outright and names
+`mute-monitor` / `unmute-monitor`, which are the only pair that can both set
+and clear it. `--option device_ids=...` is refused for the same reason: it is
+read-only in Datadog's schema, so the PUT would report success and change
+nothing. As a backstop for any option that behaves this way and is not yet
+catalogued, `update-monitor` compares the monitor Datadog returns against what
+it sent and fails on an option that did not take.
+
+`mute-monitor` requires an expiry (`--until 4h`, `--until
+'2026-09-08T00:00:00Z'`, or epoch seconds) unless `--forever` is passed: an
+un-expiring mute on a paging monitor is alert coverage removed with no moment
+at which anybody finds out. Both commands verify the artifact rather than the
+status code -- they re-read the monitor afterwards and check
+`options.silenced`, so a 200 that did not mute (or did not unmute) fails
+instead of reporting success.
 
 Run `dd-cli --help` or `dd-cli <command> --help` for details.
 

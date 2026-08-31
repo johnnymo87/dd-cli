@@ -1124,6 +1124,80 @@ class DatadogClient:
         escaped = urllib.parse.quote(monitor_id, safe="")
         return self._write("DELETE", f"/api/v1/monitor/{escaped}", params=params)
 
+    def mute_monitor(
+        self,
+        monitor_id: str,
+        *,
+        end: int | None = None,
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Mute a monitor (POST /api/v1/monitor/{id}/mute).
+
+        Muting is *not* symmetric with the monitor update endpoint: a mute can
+        be written through ``PUT`` as ``options.silenced``, but the same PUT
+        cannot take it away again (see ``unmute_monitor``). Mute and unmute are
+        therefore the only pair that can both set and clear the state.
+
+        Parameters go in the JSON body, matching Datadog's own ``datadogpy``
+        client (``Monitor.mute(id, scope=..., end=...)`` posts them as a body).
+        The endpoint is not in Datadog's generated OpenAPI spec, so the caller
+        must not treat a 200 as proof the parameters were honoured -- verify by
+        re-reading the monitor.
+
+        Args:
+            monitor_id: The numeric monitor ID.
+            end: POSIX timestamp in **seconds** at which the mute expires.
+                Omitted means muted until explicitly unmuted -- indefinitely.
+            scope: A single ``key:value`` group scope to mute. Omitted mutes
+                the whole monitor, which Datadog records under the ``*`` key.
+        """
+        body: dict[str, Any] = {}
+        if end is not None:
+            body["end"] = end
+        if scope is not None:
+            body["scope"] = scope
+        escaped = urllib.parse.quote(monitor_id, safe="")
+        return self._write(
+            "POST", f"/api/v1/monitor/{escaped}/mute", json_body=body or None
+        )
+
+    def unmute_monitor(
+        self,
+        monitor_id: str,
+        *,
+        scope: str | None = None,
+        all_scopes: bool = False,
+    ) -> dict[str, Any]:
+        """Unmute a monitor (POST /api/v1/monitor/{id}/unmute).
+
+        This is the only way to clear ``options.silenced``. ``PUT
+        /api/v1/monitor/{id}`` with ``silenced`` set to ``{}`` or ``null``
+        returns 200 and leaves the monitor muted -- verified against the live
+        API on 2026-08-31 (monitor 25447403), which is why dd-cli refuses that
+        payload instead of forwarding it.
+
+        Args:
+            monitor_id: The numeric monitor ID.
+            scope: A single ``key:value`` group scope to unmute.
+            all_scopes: Clear the mute on every scope. Mutually exclusive with
+                ``scope`` (the caller is expected to enforce that).
+        """
+        if scope is not None and all_scopes:
+            raise ValueError(
+                "unmute_monitor was given both scope and all_scopes. Datadog "
+                "would honour one of them and silently ignore the other, "
+                "leaving the caller unable to say which scopes are still muted."
+            )
+        body: dict[str, Any] = {}
+        if scope is not None:
+            body["scope"] = scope
+        if all_scopes:
+            body["all_scopes"] = True
+        escaped = urllib.parse.quote(monitor_id, safe="")
+        return self._write(
+            "POST", f"/api/v1/monitor/{escaped}/unmute", json_body=body or None
+        )
+
     # ── Dashboards (v1) ─────────────────────────────────────────────
 
     def create_dashboard(self, *, body: dict[str, Any]) -> dict[str, Any]:

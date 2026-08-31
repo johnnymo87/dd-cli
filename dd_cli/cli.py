@@ -1813,6 +1813,95 @@ def _parse_monitor_option_overrides(pairs: tuple[str, ...]) -> dict[str, Any]:
     return parsed
 
 
+# Monitor options that a PUT cannot honestly apply. Both were checked rather
+# than assumed: `silenced` against the live API (a PUT carrying
+# `silenced: {}` or `silenced: null` answers 200 and leaves the monitor muted
+# -- 2026-08-31, monitor 25447403), `device_ids` against Datadog's own OpenAPI
+# schema for MonitorOptions, where it is the only property marked
+# `readOnly: true`. Every other MonitorOptions property is writable; the
+# deprecated-but-writable ones (`groupby_simple_monitor`, `locked`,
+# `new_host_delay`, `synthetics_check_id`) are left alone deliberately -- they
+# still take effect, and refusing them would break callers for no gain.
+#
+# The generic backstop for anything not listed here is
+# `_reject_unapplied_options`, which compares what came back against what was
+# sent. This list is only for the cases where the right answer is a usage
+# error naming the command that does work.
+_UNAPPLIABLE_MONITOR_OPTIONS: dict[str, str] = {
+    "silenced": (
+        "options.silenced cannot be written through update-monitor. A PUT that "
+        "sets it mutes the monitor, but a PUT that sends {} or null to clear "
+        "it returns 200 and leaves the monitor muted -- a silent no-op that "
+        "tells an operator a paging monitor is alerting again while it is "
+        "still gagged.\n"
+        "\n"
+        "Use the endpoints that can do both, and that verify the result:\n"
+        "  dd-cli mute-monitor MONITOR --until 4h\n"
+        "  dd-cli unmute-monitor MONITOR"
+    ),
+    "device_ids": (
+        "options.device_ids is read-only in Datadog's monitor schema, so a PUT "
+        "carrying it reports success and changes nothing. Synthetics devices "
+        "are managed through the Synthetics API, not the monitor."
+    ),
+}
+
+
+def _reject_unappliable_options(options: dict[str, Any]) -> None:
+    """Refuse option keys a PUT would accept and then ignore.
+
+    An update that returns 200 without applying the change is worse than a
+    failure: the operator gets a success to act on. Fail here instead, naming
+    the command that does work.
+    """
+    for key, explanation in _UNAPPLIABLE_MONITOR_OPTIONS.items():
+        if key in options:
+            raise click.UsageError(explanation)
+
+
+def _values_agree(sent: Any, returned: Any) -> bool:
+    """Whether Datadog's echoed option value matches what was sent.
+
+    Numeric equality only (10 vs 10.0): anything cleverer would start
+    excusing differences, which is the failure this check exists to catch.
+    """
+    if isinstance(sent, bool) != isinstance(returned, bool):
+        return False
+    if isinstance(sent, (int, float)) and isinstance(returned, (int, float)):
+        return float(sent) == float(returned)
+    return bool(sent == returned)
+
+
+def _unapplied_options(sent: dict[str, Any], returned: Any) -> list[str]:
+    """Option keys the PUT response does not show as having been applied.
+
+    Datadog's PUT answers with the updated monitor, so this costs no extra
+    request. Only the keys the caller explicitly asked for are compared; the
+    merged-in existing options are not the caller's claim.
+
+    A response with no readable `options` object yields no findings: this is a
+    check for silent no-ops, and it must not manufacture a failure out of a
+    response shape it does not understand (the write may well have landed).
+    """
+    options = returned.get("options") if isinstance(returned, dict) else None
+    if not isinstance(options, dict):
+        return []
+
+    missing = object()
+    ignored: list[str] = []
+    for key, value in sent.items():
+        got = options.get(key, missing)
+        if value is None:
+            # `--option KEY=null` clears the option, and Datadog answers a
+            # cleared option by omitting the key rather than echoing null.
+            if got is missing or got is None:
+                continue
+            ignored.append(key)
+        elif got is missing or not _values_agree(value, got):
+            ignored.append(key)
+    return ignored
+
+
 class MonitorOptionUpdates(NamedTuple):
     """Caller-specified monitor options, plus how to apply them.
 
@@ -1834,6 +1923,7 @@ def _build_monitor_options(monitor_opts: dict[str, Any]) -> MonitorOptionUpdates
     update, an existing value) by accident.
     """
     overrides = _parse_monitor_option_overrides(monitor_opts.get("option") or ())
+    _reject_unappliable_options(overrides)
     options: dict[str, Any] = dict(overrides)
     replace_keys = frozenset(overrides) & {"thresholds"}
 
@@ -4005,6 +4095,13 @@ def update_monitor_cmd(
     --option 'thresholds={...}' to replace the threshold object wholesale
     (--critical/--warning only patch individual thresholds).
 
+    Not every option can be written through this endpoint. `silenced`
+    (muting) and `device_ids` (read-only) are refused up front, naming the
+    command that does work -- a PUT accepts them, answers 200, and changes
+    nothing. As a backstop for any option that behaves the same way, the
+    monitor Datadog returns is compared against what was sent, and an option
+    that did not take makes this command fail instead of reporting success.
+
     \b
     Examples:
         dd-cli update-monitor 16440468 \\
@@ -4060,15 +4157,48 @@ def update_monitor_cmd(
     except RuntimeError as e:
         _handle_runtime_error(e)
 
+    # Datadog's PUT answers with the updated monitor, so the change can be
+    # checked against the artifact instead of against the status code. A 200
+    # that did not apply the change is the failure this command shipped with
+    # for `silenced`; the named refusals above cover the two known keys, and
+    # this covers whatever else turns out to behave that way.
+    sent_options = payload.get("options") or {}
+    checked = {k: v for k, v in sent_options.items() if k in updates.options}
+    ignored = _unapplied_options(checked, data)
+    if ignored:
+        _handle_runtime_error(
+            RuntimeError(
+                f"Datadog accepted the update of monitor {monitor_id} but the "
+                "monitor it returned does not show "
+                f"{', '.join(sorted(ignored))} applied. Treat the change as "
+                "NOT made: re-read with `dd-cli get-monitor "
+                f"{monitor_id}` before relying on it. (If Datadog merely "
+                "normalised the value, the write did land -- the comparison "
+                "is exact apart from int/float.)"
+            ),
+            extra={
+                "monitor_id": monitor_id,
+                "unapplied_options": sorted(ignored),
+                "requested_options": updates.options,
+                "monitor": data,
+            },
+        )
+
     click.echo(json.dumps(data, indent=2))
 
 
-_MONITOR_NOT_FOUND_HINT = (
+_MONITOR_404_AMBIGUITY = (
     "Datadog has no monitor {monitor_id}. Three different situations produce "
     "this same 404 and they are not interchangeable: the monitor was already "
     "deleted, the ID is wrong, or DD_SITE points at the wrong Datadog region "
-    "and the monitor is alive in another one. Nothing was deleted."
+    "and the monitor is alive in another one."
 )
+
+_MONITOR_NOT_FOUND_HINT = _MONITOR_404_AMBIGUITY + " Nothing was deleted."
+
+#: The same ambiguity, for the commands where nothing was muted or unmuted.
+#: A mute that 404s leaves a monitor that may be alerting *somewhere else*.
+_MONITOR_MUTE_NOT_FOUND_HINT = _MONITOR_404_AMBIGUITY + " Nothing was muted or unmuted."
 
 # Datadog's two reference refusals, verified against its API:
 #   monitor [<id>,<name>] is referenced in slos: [<slo id>,<name>]
@@ -4250,6 +4380,563 @@ def delete_monitor_cmd(
         warn(
             f"deleted monitor {monitor_id}. This cannot be undone; the "
             "definition above is the only copy."
+        )
+
+
+# ── mute-monitor / unmute-monitor ───────────────────────────────────
+#
+# Muting is the one monitor state that cannot be round-tripped through
+# PUT /api/v1/monitor/{id}. Writing `options.silenced` through the PUT does
+# mute the monitor, but sending `{}` or `null` for the same key returns 200
+# and leaves the monitor muted (verified against the live API on 2026-08-31,
+# monitor 25447403). An operator who believes a paging monitor is alerting
+# again while it is still gagged is the worst shape this failure can take, so
+# `silenced` is refused in update-monitor and handled only here, where the
+# result is read back and checked.
+
+#: The key Datadog records a whole-monitor (unscoped) mute under.
+_ALL_SCOPES_KEY = "*"
+
+_MUTE_EXPIRY_FORMATS = (
+    "an epoch in seconds (1788000000), a UTC/offset-qualified timestamp "
+    "('2026-09-08T00:00:00Z', '2026-09-08T00:00:00+02:00'), or a duration "
+    "from now ('7d', '4h', '90m')"
+)
+
+
+def _relative_mute_expiry(value: str, now: float) -> int | None:
+    """Parse a bare forward duration like ``7d`` / ``+4h`` into an epoch."""
+    m = re.fullmatch(r"\+?(\d+)([smhdw])", value)
+    if not m:
+        return None
+    return int(now) + int(m.group(1)) * _TIME_MULTIPLIERS[m.group(2)]
+
+
+def _parse_mute_expiry(value: str, *, now: float | None = None) -> int:
+    """Convert a mute expiry to the epoch-seconds Datadog wants.
+
+    Accepts an epoch, an ISO-8601 timestamp carrying an explicit UTC offset,
+    or a forward duration (``7d``). A *naive* timestamp is refused rather than
+    guessed at: "midnight" is a different instant in every timezone, and the
+    guess would be discovered only when coverage came back at the wrong hour.
+    """
+    now = time.time() if now is None else now
+    raw = value.strip()
+    if not raw:
+        raise click.UsageError(
+            f"--until was given an empty value. Pass {_MUTE_EXPIRY_FORMATS}."
+        )
+
+    if re.fullmatch(r"[0-9]+", raw):
+        end = _require_epoch_seconds("--until", int(raw))
+    else:
+        relative = _relative_mute_expiry(raw, now)
+        if relative is not None:
+            end = relative
+        else:
+            try:
+                parsed = datetime.datetime.fromisoformat(raw)
+            except ValueError:
+                raise click.UsageError(
+                    f"Cannot parse --until {value!r}. Use {_MUTE_EXPIRY_FORMATS}."
+                ) from None
+            if parsed.tzinfo is None:
+                raise click.UsageError(
+                    f"--until {value!r} has no timezone, and dd-cli will not "
+                    "guess one: the same wall-clock time is a different "
+                    "instant in every zone, and guessing wrong means the "
+                    "monitor comes back hours early or late. Append 'Z' for "
+                    "UTC, or an explicit offset like '+02:00'."
+                )
+            end = int(parsed.timestamp())
+
+    if end <= now:
+        raise click.UsageError(
+            f"--until {value!r} resolves to {_human_epoch(end)}, which is in "
+            "the past. Datadog would either reject that or expire the mute "
+            "immediately; neither is what an expiry is for."
+        )
+    return end
+
+
+def _is_epoch(value: Any) -> bool:
+    """Whether a `silenced` value is an expiry timestamp.
+
+    `bool` is a subclass of `int`, so it has to be excluded explicitly --
+    otherwise a `true` in the mute map would render as 1970-01-01 and read as
+    a real expiry.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _human_epoch(epoch: int | None) -> str | None:
+    """Render an epoch-seconds value as a UTC ISO-8601 string."""
+    if epoch is None:
+        return None
+    return (
+        datetime.datetime.fromtimestamp(epoch, tz=datetime.UTC)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _humanize_seconds(seconds: int) -> str:
+    """Render a duration as a rough human string ('2d 3h', '45m')."""
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, _ = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts = [
+        f"{days}d" if days else "",
+        f"{hours}h" if hours else "",
+        f"{minutes}m" if minutes and not days else "",
+    ]
+    return " ".join(p for p in parts if p) or "0m"
+
+
+def _read_silenced(monitor: Any, monitor_id: str, *, action: str) -> dict[str, Any]:
+    """Extract ``options.silenced`` from a monitor, or fail loudly.
+
+    A monitor whose shape cannot be read is not evidence of an empty mute
+    list. Reporting ``{}`` here would be the same bug one level up: a claim
+    that the monitor is unmuted, made without an observation that supports it.
+    """
+    options = monitor.get("options") if isinstance(monitor, dict) else None
+    if not isinstance(options, dict):
+        _handle_runtime_error(
+            RuntimeError(
+                f"cannot verify the {action} of monitor {monitor_id}: the "
+                "monitor read back has no options object, so its mute state "
+                f"is unknown. Response: {str(monitor)[:200]}"
+            ),
+            extra={"monitor_id": monitor_id, "monitor": monitor},
+        )
+    silenced = options.get("silenced")
+    if silenced is None:
+        # Datadog omits the key (or sends null) on a monitor that has never
+        # been muted. That is a real observation of "no mute", unlike the
+        # unreadable-shape case above.
+        return {}
+    if not isinstance(silenced, dict):
+        _handle_runtime_error(
+            RuntimeError(
+                f"cannot verify the {action} of monitor {monitor_id}: "
+                f"options.silenced is {type(silenced).__name__}, not an "
+                f"object. Value: {str(silenced)[:200]}"
+            ),
+            extra={"monitor_id": monitor_id, "silenced": silenced},
+        )
+    return dict(silenced)
+
+
+def _reread_monitor(dd: DatadogClient, monitor_id: str, *, action: str) -> Any:
+    """Re-read a monitor after a write, reporting the write as unverified if
+    the read itself fails."""
+    try:
+        return dd.get_monitor(monitor_id)
+    except DatadogAPIError as e:
+        _handle_api_error(
+            e,
+            extra={
+                "monitor_id": monitor_id,
+                "hint": (
+                    f"the {action} was accepted (HTTP 2xx) but reading the "
+                    "monitor back to confirm it failed, so the resulting mute "
+                    "state is unknown. Re-run `dd-cli get-monitor "
+                    f"{monitor_id}` before acting on this."
+                ),
+            },
+        )
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra={"monitor_id": monitor_id})
+
+
+def _silenced_summary(silenced: dict[str, Any]) -> list[dict[str, Any]]:
+    """Render the silenced map as scope/expiry records, expiries humanised."""
+    return [
+        {
+            "scope": scope,
+            "end": end,
+            "end_utc": _human_epoch(end) if _is_epoch(end) else None,
+            "indefinite": end is None,
+        }
+        for scope, end in sorted(silenced.items(), key=lambda kv: str(kv[0]))
+    ]
+
+
+@cli.command("mute-monitor")
+@click.argument("monitor_id_or_url", metavar="MONITOR")
+@click.option(
+    "--until",
+    "--end",
+    "until",
+    default=None,
+    metavar="WHEN",
+    help=(
+        "When the mute expires: epoch seconds, an offset-qualified timestamp "
+        "('2026-09-08T00:00:00Z'), or a duration from now ('7d', '4h'). "
+        "Required unless --forever is passed."
+    ),
+)
+@click.option(
+    "--forever",
+    "--no-expiry",
+    "forever",
+    is_flag=True,
+    default=False,
+    help=(
+        "Mute with no expiry. The monitor stays silent until somebody "
+        "remembers to unmute it, which is how alert coverage disappears "
+        "permanently -- hence the explicit flag."
+    ),
+)
+@click.option(
+    "--scope",
+    default=None,
+    help=(
+        "Mute a single group scope (e.g. 'host:web-01', 'env:staging') "
+        "instead of the whole monitor."
+    ),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def mute_monitor_cmd(
+    monitor_id_or_url: str,
+    until: str | None,
+    forever: bool,
+    scope: str | None,
+    site: str,
+    timeout: float,
+) -> None:
+    """Mute a monitor by ID or URL until an expiry you name.
+
+    An expiry is mandatory unless you pass --forever. An un-expiring mute on a
+    paging monitor removes coverage with no scheduled moment at which anyone
+    finds out, and nothing in Datadog will remind you.
+
+    The result is verified rather than assumed: after the POST the monitor is
+    read back and its `options.silenced` is checked against what you asked
+    for. A 200 that did not actually mute the monitor -- or that muted it
+    indefinitely when you asked for an expiry -- fails this command.
+
+    \b
+    Examples:
+        dd-cli mute-monitor 25447403 --until 4h
+    \b
+        dd-cli mute-monitor 25447403 --until '2026-09-08T00:00:00Z'
+    \b
+        # One noisy group only; the rest of the monitor keeps alerting.
+        dd-cli mute-monitor 25447403 --until 2h --scope host:web-01
+    \b
+        dd-cli mute-monitor 25447403 --forever   # no expiry: read the warning
+    """
+    if until and forever:
+        raise click.UsageError(
+            "--until and --forever contradict each other. Pass an expiry, or "
+            "--forever to mute with none."
+        )
+    if not until and not forever:
+        raise click.UsageError(
+            "refusing to mute monitor "
+            f"{monitor_id_or_url!r} without an expiry. A mute with no end is "
+            "not a pause, it is a silent removal of alert coverage that "
+            "nothing will remind you about. Pass --until (e.g. --until 4h, "
+            "--until '2026-09-08T00:00:00Z') or --forever if you really mean "
+            "indefinitely."
+        )
+    if scope is not None and not scope.strip():
+        raise click.UsageError(
+            "--scope was given an empty value. Omit --scope to mute the whole "
+            "monitor; an empty scope is not a narrower mute."
+        )
+
+    monitor_id = _parse_monitor_id(monitor_id_or_url)
+    end = _parse_mute_expiry(until) if until else None
+    scope_key = scope if scope else _ALL_SCOPES_KEY
+    extra_ctx: dict[str, Any] = {
+        "monitor_id": monitor_id,
+        "scope": scope_key,
+        "requested_end": end,
+        "requested_end_utc": _human_epoch(end),
+    }
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            try:
+                dd.mute_monitor(monitor_id, end=end, scope=scope)
+            except DatadogAPIError as e:
+                extra = dict(extra_ctx)
+                if e.status_code == 404:
+                    extra["hint"] = _MONITOR_MUTE_NOT_FOUND_HINT.format(
+                        monitor_id=monitor_id
+                    )
+                _handle_api_error(e, extra=extra)
+            except RuntimeError as e:
+                _handle_runtime_error(e, extra=extra_ctx)
+
+            after = _reread_monitor(dd, monitor_id, action="mute")
+    except DatadogAPIError as e:
+        _handle_api_error(e, extra=extra_ctx)
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra=extra_ctx)
+
+    silenced = _read_silenced(after, monitor_id, action="mute")
+    missing = object()
+    applied: Any = silenced.get(scope_key, missing)
+    applied_epoch = applied if _is_epoch(applied) else None
+    payload_data = {
+        "monitor_id": monitor_id,
+        "name": after.get("name") if isinstance(after, dict) else None,
+        "scope": scope_key,
+        "requested_end": end,
+        "requested_end_utc": _human_epoch(end),
+        "applied_end": applied_epoch,
+        "applied_end_utc": _human_epoch(applied_epoch),
+        "indefinite": applied is None,
+        "silenced": _silenced_summary(silenced),
+    }
+
+    if applied is missing:
+        _handle_runtime_error(
+            RuntimeError(
+                f"Datadog accepted the mute of monitor {monitor_id} but the "
+                f"monitor read back is not muted on scope {scope_key!r} "
+                f"(options.silenced = {json.dumps(silenced)}). The monitor is "
+                "still alerting; do not treat it as muted."
+            ),
+            extra={**extra_ctx, "result": payload_data},
+        )
+
+    # Compared in both directions. An expiry that is not the one asked for is
+    # the obvious half; `--forever` that came back with an expiry is the other,
+    # and it is just as wrong -- the monitor comes back on its own at a moment
+    # nobody chose, which is the opposite of what --forever was asked to mean.
+    if applied != end:
+        recorded = (
+            "no expiry at all -- this monitor is muted INDEFINITELY"
+            if applied is None
+            else f"{applied} ({_human_epoch(applied_epoch)})"
+            if applied_epoch is not None
+            else f"{applied!r}, which is not an expiry at all"
+        )
+        wanted = (
+            "no expiry (--forever)" if end is None else f"{end} ({_human_epoch(end)})"
+        )
+        _handle_runtime_error(
+            RuntimeError(
+                f"monitor {monitor_id} was muted on scope {scope_key!r}, but "
+                f"not as asked: requested {wanted}, Datadog recorded "
+                f"{recorded}. Unmute it with `dd-cli unmute-monitor "
+                f"{monitor_id}` and re-mute with the intended expiry."
+            ),
+            extra={**extra_ctx, "result": payload_data},
+        )
+
+    emit(success_envelope(payload_data, extra={"monitor_id": monitor_id}))
+
+    where = "" if scope_key == _ALL_SCOPES_KEY else f" on scope {scope_key}"
+    if end is None:
+        warn(
+            f"monitor {monitor_id} is muted{where} with NO EXPIRY. Nothing "
+            "will page from it and nothing will remind you. Restore it with "
+            f"`dd-cli unmute-monitor {monitor_id}`."
+        )
+    else:
+        remaining = _humanize_seconds(max(0, end - int(time.time())))
+        warn(
+            f"monitor {monitor_id} is muted{where} until "
+            f"{_human_epoch(end)} ({remaining} from now), verified by "
+            "re-reading the monitor."
+        )
+
+
+@cli.command("unmute-monitor")
+@click.argument("monitor_id_or_url", metavar="MONITOR")
+@click.option(
+    "--scope",
+    default=None,
+    help=(
+        "Unmute only this group scope (e.g. 'host:web-01'). Omitted, every "
+        "scope on the monitor is unmuted."
+    ),
+)
+@click.option(
+    "--all-scopes",
+    "all_scopes",
+    is_flag=True,
+    default=False,
+    help=(
+        "Explicitly unmute every scope. This is already the default when "
+        "--scope is omitted; the flag exists to say so in a script."
+    ),
+)
+@click.option(
+    "--site",
+    envvar="DD_SITE",
+    default=_default_site,
+    show_default=True,
+    help="Datadog site, e.g., us3.datadoghq.com",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Request timeout in seconds",
+)
+def unmute_monitor_cmd(
+    monitor_id_or_url: str,
+    scope: str | None,
+    all_scopes: bool,
+    site: str,
+    timeout: float,
+) -> None:
+    """Unmute a monitor by ID or URL, and verify it is really unmuted.
+
+    This is the only way to clear a mute. `update-monitor --option
+    silenced=null` (or `silenced={}`) returns 200 and changes nothing, which
+    is why dd-cli refuses that payload and sends you here.
+
+    After the POST the monitor is read back and `options.silenced` is checked:
+    a scope that is still muted fails this command rather than reporting a
+    success that would leave a prod monitor silently gagged.
+
+    \b
+    Examples:
+        dd-cli unmute-monitor 25447403
+    \b
+        dd-cli unmute-monitor 'https://us3.datadoghq.com/monitors/25447403'
+    \b
+        # Bring one group back while the rest stays muted.
+        dd-cli unmute-monitor 25447403 --scope host:web-01
+    """
+    if scope is not None and all_scopes:
+        raise click.UsageError(
+            "--scope and --all-scopes contradict each other. Pass --scope to "
+            "unmute one group, or neither to unmute all of them."
+        )
+    if scope is not None and not scope.strip():
+        raise click.UsageError(
+            "--scope was given an empty value. Omit --scope to unmute every "
+            "scope; an empty scope is not a narrower unmute."
+        )
+
+    monitor_id = _parse_monitor_id(monitor_id_or_url)
+    scope_key = scope if scope else None
+    extra_ctx: dict[str, Any] = {
+        "monitor_id": monitor_id,
+        "scope": scope_key or _ALL_SCOPES_KEY,
+    }
+
+    try:
+        with _get_client(site, timeout=timeout) as dd:
+            try:
+                before_silenced = _read_silenced(
+                    dd.get_monitor(monitor_id), monitor_id, action="unmute"
+                )
+            except DatadogAPIError as e:
+                extra = dict(extra_ctx)
+                if e.status_code == 404:
+                    extra["hint"] = _MONITOR_MUTE_NOT_FOUND_HINT.format(
+                        monitor_id=monitor_id
+                    )
+                _handle_api_error(e, extra=extra)
+
+            try:
+                dd.unmute_monitor(
+                    monitor_id, scope=scope_key, all_scopes=scope_key is None
+                )
+            except DatadogAPIError as e:
+                _handle_api_error(
+                    e,
+                    extra={
+                        **extra_ctx,
+                        "silenced_before": _silenced_summary(before_silenced),
+                    },
+                )
+            except RuntimeError as e:
+                _handle_runtime_error(
+                    e,
+                    extra={
+                        **extra_ctx,
+                        "silenced_before": _silenced_summary(before_silenced),
+                    },
+                )
+
+            after = _reread_monitor(dd, monitor_id, action="unmute")
+    except DatadogAPIError as e:
+        _handle_api_error(e, extra=extra_ctx)
+    except RuntimeError as e:
+        _handle_runtime_error(e, extra=extra_ctx)
+
+    silenced = _read_silenced(after, monitor_id, action="unmute")
+    # A wildcard mute still gags the scope that was just unmuted, so an
+    # unmute of one scope while `*` is muted has not brought anything back.
+    # Reporting it as a success would overstate the coverage that exists.
+    still_muted: list[Any] = (
+        [s for s in (scope_key, _ALL_SCOPES_KEY) if s in silenced]
+        if scope_key
+        else list(silenced)
+    )
+    payload_data = {
+        "monitor_id": monitor_id,
+        "name": after.get("name") if isinstance(after, dict) else None,
+        "scope": scope_key or _ALL_SCOPES_KEY,
+        "was_muted": bool(before_silenced),
+        "silenced_before": _silenced_summary(before_silenced),
+        "silenced": _silenced_summary(silenced),
+        "still_muted_scopes": sorted(str(s) for s in still_muted),
+    }
+
+    if still_muted:
+        _handle_runtime_error(
+            RuntimeError(
+                f"Datadog accepted the unmute of monitor {monitor_id} but the "
+                "monitor read back is STILL MUTED on "
+                f"{', '.join(sorted(str(s) for s in still_muted))} "
+                f"(options.silenced = {json.dumps(silenced)}). Do not treat "
+                "this monitor as alerting."
+                + (
+                    f" The whole-monitor mute ({_ALL_SCOPES_KEY}) covers "
+                    f"{scope_key} too; clear it with `dd-cli unmute-monitor "
+                    f"{monitor_id}` without --scope."
+                    if scope_key and _ALL_SCOPES_KEY in still_muted
+                    else ""
+                )
+            ),
+            extra={**extra_ctx, "result": payload_data},
+        )
+
+    emit(success_envelope(payload_data, extra={"monitor_id": monitor_id}))
+
+    if not before_silenced:
+        warn(
+            f"monitor {monitor_id} was not muted to begin with; it is "
+            "unmuted now, which was already true before this ran."
+        )
+    elif scope_key:
+        warn(
+            f"monitor {monitor_id} is no longer muted on scope {scope_key}, "
+            "verified by re-reading the monitor. Other scopes still muted: "
+            f"{', '.join(sorted(silenced)) or 'none'}."
+        )
+    else:
+        warn(
+            f"monitor {monitor_id} is no longer muted on any scope, verified "
+            "by re-reading the monitor. It is alerting again."
         )
 
 

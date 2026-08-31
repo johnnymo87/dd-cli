@@ -39,6 +39,19 @@ incomplete tool. Shipped as `delete-monitor`, which captures the definition
 before destroying it, refuses to call a 404 a success, and explains Datadog's
 SLO/composite refusal instead of forcing past it by default.
 
+### ~~9. Mute and unmute a monitor~~ ✅
+
+There was no mute verb at all, so muting went through the deprecated legacy
+field (`update-monitor --option 'silenced={"*": <epoch>}'`) -- and *unmuting*
+was impossible: `--option silenced=null` and `--option 'silenced={}'` both
+returned 200, changed nothing, and exited 0. During a production incident on
+2026-08-31 the only way to bring monitor 25447403 back was to bypass dd-cli
+with `curl -X POST .../monitor/25447403/unmute`. Shipped as `mute-monitor` and
+`unmute-monitor`, which demand an expiry unless `--forever` is passed and
+verify `options.silenced` by re-reading the monitor instead of trusting the
+status code. `update-monitor` now refuses the options a PUT accepts and
+ignores, rather than reporting the no-op as a success.
+
 ## Medium Priority
 
 ### 2. Progress indicator for slow queries -- partially addressed

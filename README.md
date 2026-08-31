@@ -23,6 +23,11 @@ dd-cli search-logs 'env:prod error' --from now-1h
 # Get incident
 dd-cli get-incident 152 --enrich
 
+# Silence a noisy monitor for a named window, then bring it back
+# (an expiry is required unless you pass --forever)
+dd-cli mute-monitor 25447403 --until 4h
+dd-cli unmute-monitor 25447403
+
 # Summarize a metric timeseries per tag scope
 dd-cli query-metrics 'avg:system.cpu.user{*} by {host}' --from now-20m
 

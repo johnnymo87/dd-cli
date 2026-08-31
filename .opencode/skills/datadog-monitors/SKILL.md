@@ -1,6 +1,6 @@
 ---
 name: datadog-monitors
-description: Create, inspect, update and delete Datadog monitors via API - get monitor details by ID or URL, create or update metric/query alerts with thresholds and Slack notifications, delete a monitor safely. Use when setting up alerting, tuning monitors, investigating monitor triggers, checking monitor group states, or removing a monitor you created by mistake.
+description: Create, inspect, update, mute/unmute and delete Datadog monitors via API - get monitor details by ID or URL, create or update metric/query alerts with thresholds and Slack notifications, mute a monitor for a window and unmute it again, delete a monitor safely. Use when setting up alerting, tuning monitors, investigating monitor triggers, checking monitor group states, silencing a noisy monitor during an incident, or removing a monitor you created by mistake.
 ---
 
 # Datadog Monitors
@@ -96,7 +96,7 @@ dd-cli get-monitor 12345678 --group-states all
 | `overall_state` | Current state: `OK`, `Alert`, `Warn`, `No Data` |
 | `state.groups` | Per-group state with `last_triggered_ts`, `last_resolved_ts` (requires `--group-states`) |
 | `query` | The monitor query (metric, threshold, grouping) |
-| `options.silenced` | Muted groups with expiry timestamps |
+| `options.silenced` | Muted groups with expiry timestamps (`{}` when unmuted). Change it with `mute-monitor`/`unmute-monitor`, never with `update-monitor` |
 | `options.thresholds` | Critical/warning threshold values |
 | `message` | Notification template with Slack/PagerDuty targets |
 
@@ -225,7 +225,10 @@ removed.
 - `--critical` / `--warning` patch individual thresholds; pass
   `--option 'thresholds={"critical": 5}'` to replace the whole object
   (the only way to *remove* a threshold).
-- `--option KEY=null` clears an option.
+- `--option KEY=null` clears an option -- except for the ones a PUT
+  cannot apply: `silenced` (use `mute-monitor`/`unmute-monitor`) and
+  `device_ids` (read-only) are refused, and any other option that comes
+  back unapplied fails the command instead of reporting success.
 - The read-modify-write GET->PUT is not atomic (no ETag on the monitor
   API): a concurrent edit between the two calls is overwritten.
 - `--option` rejects Python-flavoured literals (`True`, `None`) and
@@ -301,6 +304,77 @@ dd-cli update-monitor 12345678 \
 | `max` | Fires on any spike in the window | High-sensitivity, never-miss alerts |
 | `avg` | Fires when average exceeds threshold | Sustained-load alerts |
 | `min` | Fires only if threshold exceeded for entire window | Filtering transient blips (deploys, restarts) |
+
+## Mute and Unmute a Monitor
+
+```bash
+# Mute for a window. An expiry is REQUIRED unless you say --forever.
+dd-cli mute-monitor 25447403 --until 4h
+dd-cli mute-monitor 25447403 --until '2026-09-08T00:00:00Z'
+dd-cli mute-monitor 25447403 --until 1788000000        # epoch seconds
+
+# One noisy group only; the rest of the monitor keeps paging.
+dd-cli mute-monitor 25447403 --until 2h --scope host:web-01
+
+# The only way to clear a mute.
+dd-cli unmute-monitor 25447403
+dd-cli unmute-monitor 25447403 --scope host:web-01
+```
+
+**`update-monitor` cannot unmute, and it will not pretend to.** Muting is the
+one monitor state that does not round-trip through `PUT /api/v1/monitor/{id}`:
+a PUT carrying `options.silenced` mutes the monitor, but a PUT carrying
+`silenced: {}` or `silenced: null` answers **200 and leaves it muted**
+(verified against the live API on 2026-08-31, monitor 25447403). That silent
+no-op is the worst available failure -- it tells an operator a paging monitor
+is alerting again while it is still gagged. `dd-cli update-monitor --option
+silenced=...` is therefore refused up front and points here.
+`--option device_ids=...` is refused too: it is `readOnly` in Datadog's monitor
+schema, so the PUT would report success and change nothing. For anything else
+that turns out to behave this way, `update-monitor` compares the monitor
+Datadog returns against what it sent and fails on an option that did not take.
+
+**An expiry is mandatory.** A mute with no end is not a pause; it is alert
+coverage removed with no scheduled moment at which anybody finds out, and
+Datadog will not remind you. Pass `--forever` (alias `--no-expiry`) if that is
+genuinely what you mean.
+
+**Both commands verify the artifact, not the status code.** After the POST the
+monitor is re-read and `options.silenced` is checked against the intent. These
+all fail rather than reporting success:
+
+| What Datadog did | What dd-cli does |
+| --- | --- |
+| 200, monitor not actually muted | fails: "the monitor read back is not muted on scope ..." |
+| 200, muted but with no expiry when one was asked for | fails: "this monitor is muted INDEFINITELY" |
+| 200, muted on `*` when `--scope host:web-01` was asked for | fails: the requested scope is not muted |
+| 200, still muted after an unmute | fails: "STILL MUTED" |
+| 200, `--scope` unmuted while the whole monitor is muted on `*` | fails: the wildcard mute still gags that scope |
+| 200, `--forever` came back with an expiry | fails: the monitor would un-mute itself at an hour nobody chose |
+| write OK, read-back 403/404 | fails, with a hint that the resulting state is unknown |
+
+An unmute of a monitor that was not muted still exits 0, but says so on
+stderr: "was not muted to begin with" and "I unmuted it" are different facts.
+
+### mute-monitor / unmute-monitor Options
+
+| Option | Command | Description |
+| --- | --- | --- |
+| `--until WHEN` (`--end`) | mute | Expiry: epoch seconds, an offset-qualified timestamp (`2026-09-08T00:00:00Z`), or a duration from now (`7d`, `4h`, `90m`) |
+| `--forever` (`--no-expiry`) | mute | Mute with no expiry. Required to express an indefinite mute |
+| `--scope` | both | One group scope, e.g. `host:web-01`. Omitted, the whole monitor |
+| `--all-scopes` | unmute | Explicitly unmute every scope (already the default) |
+| `--site` / `--timeout` | both | As elsewhere |
+
+A naive timestamp (`2026-09-08T00:00:00`, no `Z`/offset) is refused rather than
+guessed at, and so is an expiry in the past or one that looks like epoch
+milliseconds.
+
+- **Endpoints**: `POST /api/v1/monitor/{id}/mute`, `POST /api/v1/monitor/{id}/unmute`
+- **Parameters** (`end`, `scope`, `all_scopes`) go in the JSON body, matching
+  Datadog's own `datadogpy` client. These two endpoints are absent from
+  Datadog's generated OpenAPI spec, which is another reason not to trust their
+  200 without re-reading the monitor.
 
 ## Delete a Monitor
 

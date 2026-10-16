@@ -298,13 +298,13 @@ Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 ## Skills (Detailed Guides)
 
-These are available as skills in `.claude/skills/` (Claude Code) and `.opencode/skills/` (OpenCode):
+These skills live in `.agents/skills/` (the cross-tool location read by OpenCode and Goose; Claude Code does not scan it):
 
 - **datadog-auth** - Troubleshoot 401/403 errors, understand keys and regions
 - **datadog-logs** - Log search syntax, storage tiers (flex), pagination
 - **datadog-incidents** - Incident enrichment, update fields, API patterns
 - **datadog-log-metrics** - Log-based metrics: create/list/audit/update/delete, the anchor-collision trap, and the '@'-prefix trap
-- **datadog-monitors** - Create and inspect monitors (thresholds, group states, Slack notifications)
+- **datadog-monitors** - Create, inspect, update, mute/unmute and delete monitors (thresholds, group states, Slack notifications)
 - **datadog-slos** - List SLOs, inspect SLI values, error budgets, and threshold history
 - **datadog-metrics** - Query metric timeseries, find metric names, rollup and null-handling traps
 - **datadog-workflows** - Fetch workflow definitions and execution instances

@@ -112,15 +112,15 @@ Run `dd-cli --help` or `dd-cli <command> --help` for details.
 
 | Skill | Description |
 |-------|-------------|
-| [datadog-auth](.opencode/skills/datadog-auth/SKILL.md) | Troubleshoot 401/403 errors, understand keys and regions |
-| [datadog-logs](.opencode/skills/datadog-logs/SKILL.md) | Log search syntax, storage tiers (flex), pagination |
-| [datadog-incidents](.opencode/skills/datadog-incidents/SKILL.md) | Incident enrichment, update fields, API patterns |
-| [datadog-log-metrics](.opencode/skills/datadog-log-metrics/SKILL.md) | Log-based metrics: create/list/audit/update/delete, the anchor-collision trap, and the '@'-prefix trap |
-| [datadog-monitors](.opencode/skills/datadog-monitors/SKILL.md) | Create, inspect, and update monitors (thresholds, group states, notifications) |
-| [datadog-slos](.opencode/skills/datadog-slos/SKILL.md) | List SLOs, inspect SLI values, error budgets, and threshold history |
-| [datadog-metrics](.opencode/skills/datadog-metrics/SKILL.md) | Query metric timeseries, find metric names, rollup and null-handling traps |
-| [datadog-workflows](.opencode/skills/datadog-workflows/SKILL.md) | Fetch workflow definitions and execution instances |
-| [datadog-error-tracking](.opencode/skills/datadog-error-tracking/SKILL.md) | Search/manage error tracking issues, resolve/ignore states |
+| [datadog-auth](.agents/skills/datadog-auth/SKILL.md) | Troubleshoot 401/403 errors, understand keys and regions |
+| [datadog-logs](.agents/skills/datadog-logs/SKILL.md) | Log search syntax, storage tiers (flex), pagination |
+| [datadog-incidents](.agents/skills/datadog-incidents/SKILL.md) | Incident enrichment, update fields, API patterns |
+| [datadog-log-metrics](.agents/skills/datadog-log-metrics/SKILL.md) | Log-based metrics: create/list/audit/update/delete, the anchor-collision trap, and the '@'-prefix trap |
+| [datadog-monitors](.agents/skills/datadog-monitors/SKILL.md) | Create, inspect, update, mute/unmute and delete monitors (thresholds, group states, notifications) |
+| [datadog-slos](.agents/skills/datadog-slos/SKILL.md) | List SLOs, inspect SLI values, error budgets, and threshold history |
+| [datadog-metrics](.agents/skills/datadog-metrics/SKILL.md) | Query metric timeseries, find metric names, rollup and null-handling traps |
+| [datadog-workflows](.agents/skills/datadog-workflows/SKILL.md) | Fetch workflow definitions and execution instances |
+| [datadog-error-tracking](.agents/skills/datadog-error-tracking/SKILL.md) | Search/manage error tracking issues, resolve/ignore states |
 
 ## Configuration
 
